@@ -1,0 +1,232 @@
+\documentclass[conference, 10pt]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+% packages
+\usepackage{parskip}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{footnote}
+\usetikzlibrary{positioning, shapes, arrows.meta}
+
+\begin{document}
+
+\title{\LARGE Decentralised Learning: Research Ideas}
+
+\author{
+  \IEEEauthorblockN{\bf Mika Senghaas\IEEEauthorrefmark{1}}
+  \IEEEauthorblockA{EPFL \\ \textit{mika.senghaas@epfl.ch}}  
+  \and
+  \IEEEauthorblockN{\bf Martijn De Vos\IEEEauthorrefmark{2}}
+  \IEEEauthorblockA{EPFL \\ \textit{martijn.devos@epfl.ch}}
+  \and
+  \IEEEauthorblockN{\bf Rishi Sharma\IEEEauthorrefmark{2}}
+  \IEEEauthorblockA{EPFL \\ \textit{rishi.sharma@epfl.ch}}
+  \and
+  \IEEEauthorblockN{\bf Akash Dhasad\IEEEauthorrefmark{2}}
+  \IEEEauthorblockA{EPFL \\ \textit{akash.dhasade@epfl.ch}}
+}
+
+\maketitle
+
+{\small\itshape \IEEEauthorrefmark{1} Author, \IEEEauthorrefmark{2} Supervisor}
+
+\begin{abstract}
+  This document outlines the motivation, problem definition, and potential
+  research directions for an optional research project in decentralised learning
+  at the Scalable Computing Systems (SaCS) lab at EPFL.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Deep Learning, Decentralised Training
+\end{IEEEkeywords}
+
+\section{Introduction} 
+
+% Scale
+Following the promises of the scaling laws~\cite{kaplan2020,hoffmann2022},
+modern foundation models have hundreds of billion of parameters and are trained
+on tens of trillions of
+tokens~\cite{brown2023,touvron2023,dubey2024,openai2024,chowdhery2022,geminiteam2024}.
+At this scale, it is infeasible to train on a single device. A natural solution
+is to distribute computation, i.e. have many devices collaboratively train a
+single model.
+
+% SOTA Distributed training
+The main idea in distributed training is to partition the data, model, and
+optimiser states across devices to lower the memory usage per device and
+training time through parallel computation. Many parallelisation techniques have
+been proposed, most notably data parallelism, pipeline parallelism , and tensor
+parallelism. Often, models use these techniques in conjunction~\cite{dubey2024,
+shoeybi2020}. For example, Llama 3.1 405B employs four types of parallelism
+across 16K H100 GPUs~\cite{dubey2024}. However, naive implementations of these
+techniques only work well under the assumption of fast, homogeneous compute, as
+present in data centres.
+
+% Problem and promise
+Training at this scale in data centres is expensive and only feasible for a
+selected few companies with the necessary resources. Thus, the current paradigm
+limits who can participate in AI development and slows the pace of innovation.
+
+% Decentralisation
+Decentralisation is a promising alternative to data centre training. If we had
+efficient algorithms for large-scale pre-training on heterogeneous devices and
+networks, we could use the vast cheap, consumer-grade resources across the globe
+to train the next generation of open-source foundation
+models~\cite{weisser2024}.
+
+\section{Problem Setting}
+
+However, training decentralised is challenging:
+
+\begin{enumerate}[label=(\arabic*)]
+  \item (\textit{Network}) Devices may be distributed globally; an efficient
+    algorithm trains efficiently despite slow interconnect
+  \item (\textit{Hardware}) Devices may range from consumer-grade to
+    data centre GPUs; an efficient algorithm  ensures high utilisation across
+    all devices
+  \item (\textit{Reliability}) Devices may leave or enter the training at any
+    time; a robust algorithm is fault-tolerant and dynamically adapts to the
+    amount of compute available
+  \item \textit{(Scale)} Devices may be numerous; a scalable method should be
+    more efficient as more compute becomes available, independent of the model or
+    data size
+\end{enumerate}
+
+In certain cases, some requirements may be relaxed. For example, if most workers
+are located in data centres, reliability is less of a worry. However, this work
+is interested in the most challenging environment, satisfying requirements
+(1)-(4).  We will study the requirements in the context of pre-training a
+large-scale Transformer~\cite{vaswani2017} model for language modelling.
+
+\section{Background} 
+
+% Data parallelism
+Stochastic gradient-based training naturally lends itself to an easy form of
+parallelism, called data parallelism. Here, each worker holds a copy of the
+entire model and a local data shard. Each device trains locally, before the local
+gradients are synchronised. Traditional data parallel methods~\cite{mcmahan2016}
+require synchronisation of local gradients at every step, rendering the method
+unfeasible in a decentralised setting as communication costs are too high.
+
+% DiLoCo
+DiLoCo~\cite{douillard2023} is a framework that enables low-bandwidth data
+parallel training on poorly connected islands of workers. It proposes an
+inner-outer optimisation scheme, in which workers train for $H\sim 500$ steps on
+local data shards using AdamW~\cite{loshchilov2019} before synchronising
+pseudo-gradients using a global Nesterov optimiser. DiLoCo sets the standard for
+distributed data parallel training, matching performance of traditional methods
+while significantly reducing wall clock-time and communication cost. While
+DiLoCo is robust to dynamic worker arrangements, it faces many of the same
+challenges as traditional data parallel training. In particular, the synchronous
+nature of the global gradient update can lead to significant idle time when
+faster workers have to wait for slower workers to finish their local training
+task. Further, DiLoCo does not scale naturally to huge models that do not fit
+into the workers' memory - relying on slow parameter offloading
+methods~\cite{rhu2016, cui2016} to scale. In summary, it (partially) satisfies
+requirements 1 and 3, but fails 2 and 4.
+
+% Asynchronicity in DiLoCo
+Follow up work from DeepMind~\cite{li2024} tries to address the efficiency
+issues in heterogeneous environments by allowing asynchronous global updates on
+a centralised parameter server. While comprehensive, the work does not find a
+scalable solution to asynchronous data parallel training yet.
+
+% TODO: Write more about this
+
+% Pipeline parallelism
+When a single worker cannot fit the entire model into memory, the model itself
+has to be sharded. A common technique is pipeline parallelism which partitions a
+model vertically into groups of subsequent layers. In this paradigm, activations
+need to be communicated between workers handling subsequent layers during the
+forward, and gradients during the backward pass. Traditional pipeline
+parallelism is not feasible in the decentralised setting. Due to its inherently
+sequential nature, the entire pipeline is bottlenecked by its weakest link,
+leading to idle time for quicker workers. Furthermore, a naive implementation is
+not fault-tolerant, as the failure of any worker will stall the entire training
+procedure.
+
+% SWARM
+SWARM parallelism~\cite{ryabinin2023} translates the idea of pipeline
+parallelism into an efficient algorithm in the distributed setting. Their main
+innovation is in making the pipeline dynamic and redundant: A pipeline stage is
+served by a swarm of devices. Any device in a swarm may communicate with any
+device in the preceding and succeeding stage. They introduce \textit{stochastic
+wiring} where each device makes a request to the next pipeline stage according
+to statistics on the throughput of the available devices, ensuring that faster
+or better connected devices handle more requests. Further, due to \textit{swarm
+balancing}, devices periodically switch from under- to overutilised swarms to
+distribute the workload. SWARM fulfils requirements 1-4 and is therefore a
+promising research direction. While there is an open-source implementation,
+Petals~\cite{borzunov2023}, to the best of our knowledge, the method's
+feasibility has not been empirically verified for models in the 10B+ regime.
+
+% Genetic scheduling
+Finally, Yuan et. al~\cite{yuan2022} try to combine data and pipeline
+parallelism by finding an optimal allocation of devices to micro-batches and
+pipeline stages such that the global communication requirements are minimised.
+They propose a genetic algorithm that jointly minimises communication
+requirements. Yet, their global scheduling is static and, consequently, does not
+handle device failures.
+
+% Complementary research directions
+Many works also consider complementary approaches to decrease communication
+requirements, for example by gradient sparsification, quantisation or delayed
+parameter updates~\cite{yuan2022, ryabinin2023, tang2020}.
+
+\section{Research Ideas}
+
+There are many interesting, potential research avenues, listed here in order of
+difficulty:
+
+% Battle-test SWARM
+(\textit{Battle-test SWARM}) SWARM parallelism~\cite{ryabinin2023} is naturally
+closest to the problem setting considered for this work. However, in the
+original work the authors only provide empirical validation for relatively small
+models trained on spot instances. This work could (re-)implement SWARM and
+benchmark it in various settings, with the ultimate goal of training a
+larger-scale, e.g. 10B+ parameter model on volunteer compute.
+
+% Benchmarking
+(\textit{Benchmarking}) Comparing the efficacy of the various decentralised
+learning algorithms is a low-hanging, but valuable fruit. One could set up an
+experiment setup in the style of Yuan et. al~\cite{yuan2022}, where common
+decentralised algorithms~\cite{douillard2023, ryabinin2023, li2024} are
+benchmarked in environments of varying compute and network heterogeneity, i.e.
+from on-demand data centres to volunteer compute. This project would involve
+getting hands-on with many different decentralised training algorithms and would
+be valuable in shedding light on the most promising algorithm for future
+research.
+
+% AsyncDiLoCo
+(\textit{AsyncDiLoCo}) In the setting of islands of high-performance GPUs
+collaboratively training a small to medium-sized model, DiLoCo
+\cite{douillard2023} is a valid choice. A natural direction to improve
+DiLoCo~\cite{douillard2023} is to enable asynchronous training. This work would
+be a direct continuation of Li et. al~\cite{li2024} and could build on the
+open-source re-implementation OpenDiLoCo~\cite{jaghouar2024}. While
+intellectually appealing, the rewards are potentially limited, as the method
+remains bounded to the memory requirements of the smallest device.
+
+% Multi-Prallel Training
+(\textit{Multi-Parallel Training}) An exciting future avenue for decentralised
+learning is to combine multiple forms of parallelism. Yuan et.
+al~\cite{yuan2022} propose a method to combine data and pipeline parallelism,
+and also SWARM exhibits a form of combined data and pipeline parallelism. Can we
+unify these methods, and possibly extend them to more forms of parallelism? This
+question is likely too ambitious for an 8-credit project, but nice to keep in
+mind as an overarching research goal.
+
+\textit{-- Lausanne, 24.09.2024}
+
+\bibliography{references}
+\bibliographystyle{IEEEtran}
+
+\end{document}
