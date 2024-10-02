@@ -1,0 +1,8 @@
+transformers
+datasets
+torch
+sentencepiece
+autorootcwd
+jupyter
+ipywidgets
+pandas
