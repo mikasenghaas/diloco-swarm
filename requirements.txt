@@ -6,3 +6,4 @@ autorootcwd
 jupyter
 ipywidgets
 pandas
+git+https://github.com/samsja/pydantic_config
