@@ -1,16 +1,14 @@
 import math
-import time
-from functools import wraps
 import torch
 import numpy as np
 from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
-from .config import ModelConfig, TokenizerConfig, DataConfig, LoggingConfig, SchedulerConfig, OptimizerConfig, TrainConfig
+from .config import ModelConfig, TokenizerConfig, DataConfig, LoggingConfig, TrainConfig
 from .logger import CustomLogger
 from .metrics import Metrics
 
@@ -54,7 +52,15 @@ def get_scheduler(train: TrainConfig, optimizer: AdamW, num_steps: int) -> Lambd
     return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
-    dataset = load_dataset(data.path, data.name, split=split)
+    local_path = f"data/{data.path}/{data.name}"
+    try:
+        datadict = load_from_disk(local_path)
+    except FileNotFoundError:
+        datadict = load_dataset(data.path, data.name)
+        datadict.save_to_disk(local_path)
+
+    dataset = datadict[split]
+    
     if split == "train" and data.subset_size < 1.0:
         return dataset.shuffle(seed=42).select(range(int(len(dataset) * data.subset_size)))
     return dataset
