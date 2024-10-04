@@ -16,7 +16,6 @@ class DataConfig(BaseConfig):
     seq_length: int = 128
     num_workers: int = 1
     subset_size: float = 1.0
-    cycle: bool = True
 
 class OptimizerConfig(BaseConfig):
     lr: float = 4e-4
@@ -24,29 +23,28 @@ class OptimizerConfig(BaseConfig):
     betas: list[float] = [0.9, 0.95]
     
 class SchedulerConfig(BaseConfig):
-    enable: bool = True
+    enable: bool = False
     warmup_steps: int = 100
     num_cycles: float = 0.5
     last_epoch: int = -1
 
 class TrainConfig(BaseConfig):
-    seed: int = 42
-
     max_steps: int = 10000
-    batch_size: int = 8
+    batch_size: int = 16
+    seed: int = 42
 
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
 
-class ValidationConfig(BaseConfig):
-    enable: bool = False
-    every_n_steps: int = 100
-    max_steps: int = 100
+class EvalConfig(BaseConfig):
+    enable: bool = True
+    every_n_steps: int = -1
+    max_steps: int = 1000
     batch_size: int = 1
 
-class TestConfig(BaseConfig):
-    enable: bool = False
-    batch_size: int = 1
+class CheckpointingConfig(BaseConfig):
+    enable: bool = True
+    every_n_steps: int = -1
 
 class ConsoleLoggingConfig(BaseConfig):
     enable: bool = True
@@ -69,20 +67,17 @@ class LoggingConfig(BaseConfig):
     console: ConsoleLoggingConfig = ConsoleLoggingConfig()
     file: FileLoggingConfig = FileLoggingConfig()
     wandb: WandbLoggingConfig = WandbLoggingConfig()
+    ckpt: CheckpointingConfig = CheckpointingConfig()
 
 class Config(BaseConfig):
     model: ModelConfig = ModelConfig()
     tokenizer: TokenizerConfig = TokenizerConfig()
     data: DataConfig = DataConfig()
     train: TrainConfig = TrainConfig()
-    val: ValidationConfig = ValidationConfig()
-    test: TestConfig = TestConfig()
+    eval: EvalConfig = EvalConfig()
     logging: LoggingConfig = LoggingConfig()
 
-
 if __name__ == "__main__":
-    from rich.pretty import pprint as rpprint
-    from pprint import pprint
     import yaml
 
     class TestConfig(BaseConfig):
@@ -90,15 +85,8 @@ if __name__ == "__main__":
         tokenizer: TokenizerConfig = TokenizerConfig()
         data: DataConfig = DataConfig()
         train: TrainConfig = TrainConfig()
-        val: ValidationConfig = ValidationConfig()
-        test: TestConfig = TestConfig()
+        eval: EvalConfig = EvalConfig()
         logging: LoggingConfig = LoggingConfig()
 
     config = TestConfig(**parse_argv())
-    config_dict = config.model_dump()
-
-    pprint(config_dict)
-    print("\n")
-    rpprint(config_dict, expand_all=True)
-    print("\n")
-    print(yaml.dump(config_dict, sort_keys=False))
+    print(yaml.dump(config.model_dump(), sort_keys=False))

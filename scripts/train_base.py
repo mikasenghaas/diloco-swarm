@@ -84,12 +84,12 @@ def main(config: Config):
     
     # Prepare data loaders
     train_dataloader = get_dataloader(train_data_tok, batch_size=config.train.batch_size, shuffle=True, cycle=config.data.cycle)
-    val_dataloader = get_dataloader(val_data_tok, batch_size=config.val.batch_size, shuffle=True, cycle=config.data.cycle)
-    test_dataloader = get_dataloader(test_data_tok, batch_size=config.test.batch_size, shuffle=False, cycle=False)
+    val_dataloader = get_dataloader(val_data_tok, batch_size=config.eval.batch_size, shuffle=True, cycle=config.data.cycle)
+    test_dataloader = get_dataloader(test_data_tok, batch_size=config.eval.batch_size, shuffle=False, cycle=False)
     logger.log_message(f"Prepared dataloaders")
     
     # Compute number of training batches
-    epoch_train_batches = len(train_data) // config.train.batch_size
+    epoch_train_batches = len(train_data_tok) // config.train.batch_size
     num_batches = min(epoch_train_batches, config.train.max_steps)
 
     # Set up optimizer
@@ -113,26 +113,30 @@ def main(config: Config):
         train_bar.set_description(get_train_pbar_description(train_metrics, prefix="[TRAIN]"))
 
         # Validate
-        if config.val.enable and train_step % config.val.every_n_steps == 0:
-            num_eval_batches = len(val_data) // config.val.batch_size
-            eval_bar = tqdm(range(1, min(num_eval_batches, config.val.max_steps)+1), position=1, leave=False)
+        if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
+            num_eval_batches = len(val_data_tok) // config.eval.batch_size
+            eval_bar = tqdm(range(1, min(num_eval_batches, config.eval.max_steps)+1), position=1, leave=False)
             eval_metrics.reset()
-            for val_step in eval_bar:
+            for eval_step in eval_bar:
                 # Eval step
                 batch = next(val_dataloader)
-                outputs = eval(val_step, model, batch, device)
+                outputs = eval(eval_step, model, batch, device)
 
                 # Compute and log metrics
                 eval_metrics.update(outputs)
-                eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[VAL]"))
+                eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]"))
 
             curr_metrics = eval_metrics.compute()
             logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
 
+        # Checkpoint
+        if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
+            logger.log_checkpoint(model, tokenizer, train_step)
+
     # Evaluate
-    if config.test.enable:
+    if config.eval.enable:
         test_metrics = Metrics([Loss(), Perplexity()], name="test")
-        test_bar = tqdm(range(1, len(test_dataloader)+1), position=0, leave=True)
+        test_bar = tqdm(range(1, min(len(test_dataloader), config.eval.max_steps)+1), position=0, leave=True)
         for test_step in test_bar:
             batch = next(test_dataloader)
             outputs = eval(test_step, model, batch, device)
@@ -143,6 +147,10 @@ def main(config: Config):
 
         curr_metrics = test_metrics.compute()
         logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
+
+    # Checkpoint
+    if config.logging.ckpt.enable:
+        logger.log_checkpoint(model, tokenizer, train_step)
 
     logger.log_message("Finished training!")
     logger.close()
