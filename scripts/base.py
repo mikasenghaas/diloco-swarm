@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps
 from pydantic import validate_call
 from pydantic_config import parse_argv
 from src.config import Config
@@ -74,33 +74,37 @@ def main(config: Config):
     train_data = get_dataset(config.data, split="train")
     val_data = get_dataset(config.data, split="validation")
     test_data = get_dataset(config.data, split="test")
-    logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {len(train_data)} train, {len(val_data)} validation, {len(test_data)} test samples")
+    logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {len(train_data)} train, {len(val_data)} validation, {len(test_data)} test examples")
 
     # Prepare dataset
-    train_data_tok = train_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
-    val_data_tok = val_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
-    test_data_tok = test_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
-    logger.log_message(f"Tokenized dataset with {len(train_data_tok)} train, {len(val_data_tok)} validation, {len(test_data_tok)} test samples")
+    train_data = train_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
+    val_data = val_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
+    test_data = test_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
+    logger.log_message(f"Tokenized dataset with {len(train_data)} train, {len(val_data)} validation, {len(test_data)} test examples")
     
     # Prepare data loaders
-    train_dataloader = get_dataloader(train_data_tok, batch_size=config.train.batch_size, shuffle=True, cycle=config.data.cycle)
-    val_dataloader = get_dataloader(val_data_tok, batch_size=config.eval.batch_size, shuffle=True, cycle=config.data.cycle)
-    test_dataloader = get_dataloader(test_data_tok, batch_size=config.eval.batch_size, shuffle=False, cycle=False)
+    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=True, cycle=True)
+    val_dataloader = get_dataloader(val_data, batch_size=config.eval.batch_size, shuffle=True, cycle=True)
+    test_dataloader = get_dataloader(test_data, batch_size=config.eval.batch_size, shuffle=False, cycle=True)
     logger.log_message(f"Prepared dataloaders")
     
-    # Compute number of training batches
-    epoch_train_batches = len(train_data_tok) // config.train.batch_size
-    num_batches = min(epoch_train_batches, config.train.max_steps)
+    # Compute number of training steps
+    num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
+    num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.eval.batch_size)
+    num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
+    logger.log_message(f"Train setup:\tSteps: {num_train_steps}\tBatch Size: {config.train.batch_size}\tExamples: {num_train_steps * config.train.batch_size}\t Tokens: {num_train_steps * config.train.batch_size * config.data.seq_length}\t Fraction of Data: {num_train_steps * config.train.batch_size / len(train_data):.2f}")
+    logger.log_message(f"Eval setup:\tSteps: {num_eval_steps}\tBatch Size: {config.eval.batch_size}\tExamples: {num_eval_steps * config.eval.batch_size}\t Tokens: {num_eval_steps * config.eval.batch_size * config.data.seq_length}\t Fraction of Data: {num_eval_steps * config.eval.batch_size / len(val_data):.2f}")
+    logger.log_message(f"Test setup:\tSteps: {num_test_steps}\tBatch Size: {config.eval.batch_size}\tExamples: {num_test_steps * config.eval.batch_size}\t Tokens: {num_test_steps * config.eval.batch_size * config.data.seq_length}\t Fraction of Data: {num_test_steps * config.eval.batch_size / len(test_data):.2f}")
 
     # Set up optimizer
     optimizer = get_optimizer(config.train, model)
-    scheduler = get_scheduler(config.train, optimizer, num_batches)
+    scheduler = get_scheduler(config.train, optimizer, num_train_steps)
 
     # Start Training
     logger.log_message("Starting training")
     train_metrics = Metrics([Step(), ExamplesSeen(), TokensSeen(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
-    train_bar = tqdm(range(1, num_batches+1), position=0, leave=True)
+    train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
@@ -114,8 +118,7 @@ def main(config: Config):
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
-            num_eval_batches = len(val_data_tok) // config.eval.batch_size
-            eval_bar = tqdm(range(1, min(num_eval_batches, config.eval.max_steps)+1), position=1, leave=False)
+            eval_bar = tqdm(range(1, num_eval_steps+1), position=1, leave=False)
             eval_metrics.reset()
             for eval_step in eval_bar:
                 # Eval step
@@ -136,7 +139,8 @@ def main(config: Config):
     # Evaluate
     if config.eval.enable:
         test_metrics = Metrics([Loss(), Perplexity()], name="test")
-        test_bar = tqdm(range(1, min(len(test_dataloader), config.eval.max_steps)+1), position=0, leave=True)
+        num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
+        test_bar = tqdm(range(1, num_test_steps+1), position=0, leave=True)
         for test_step in test_bar:
             batch = next(test_dataloader)
             outputs = eval(test_step, model, batch, device)

@@ -43,14 +43,14 @@ def get_tokenizer(tokenizer: TokenizerConfig) -> AutoTokenizer:
 def get_optimizer(train: TrainConfig, model: AutoModelForCausalLM) -> AdamW:
     return AdamW(model.parameters(), lr=train.optimizer.lr, weight_decay=train.optimizer.decay, betas=train.optimizer.betas)
 
-def get_scheduler(train: TrainConfig, optimizer: AdamW, num_batches: int) -> LambdaLR:
+def get_scheduler(train: TrainConfig, optimizer: AdamW, num_steps: int) -> LambdaLR:
     if train.scheduler.enable:
-        def lr_lambda(step, warmup_steps, num_batches, num_cycles):
+        def lr_lambda(step, warmup_steps, num_steps, num_cycles):
             if step < warmup_steps:
                 return float(step) / float(max(1, warmup_steps))
-            progress = float(step - warmup_steps) / float(max(1, num_batches - warmup_steps))
+            progress = float(step - warmup_steps) / float(max(1, num_steps - warmup_steps))
             return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
-        return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_batches, train.scheduler.num_cycles), last_epoch=train.scheduler.last_epoch)
+        return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_steps, train.scheduler.num_cycles), last_epoch=train.scheduler.last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
@@ -91,3 +91,11 @@ def get_eval_pbar_description(metrics: Metrics, prefix: str):
     loss = curr_metrics.get(f"{metrics.name}/loss/average")
     perplexity = curr_metrics.get(f"{metrics.name}/perplexity/average")
     return f"{prefix} Avg. Loss: {loss:.4f}, Avg. Perplexity: {perplexity:.1f}"
+
+def get_num_steps(max_steps: int, max_epochs: int, num_examples: int, batch_size: int) -> int:
+    """Get number of steps to train/val/test; whatever is reached first max_steps or max_epochs"""
+    assert max_steps > 0 or max_epochs > 0, "Specify at least one of `max_steps` and `max_epochs`"
+    max_steps_epoch = num_examples // batch_size * max_epochs
+    if max_epochs == -1: return max_steps
+    elif max_steps == -1: return max_steps_epoch
+    else: return min(max_steps, max_steps_epoch)
