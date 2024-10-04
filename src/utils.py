@@ -43,20 +43,21 @@ def get_optimizer(train: TrainConfig, model: AutoModelForCausalLM) -> AdamW:
 
 def get_scheduler(train: TrainConfig, optimizer: AdamW, num_steps: int) -> LambdaLR:
     if train.scheduler.enable:
-        def lr_lambda(step, warmup_steps, num_steps, num_cycles):
+        def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
             if step < warmup_steps:
-                return float(step) / float(max(1, warmup_steps))
-            progress = float(step - warmup_steps) / float(max(1, num_steps - warmup_steps))
-            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
+                return step / max(1, warmup_steps)
+            progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
+            return min_lr_factor + (1 - min_lr_factor) * cosine_decay
         return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_steps, train.scheduler.num_cycles), last_epoch=train.scheduler.last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
-    local_path = f"data/{data.path}/{data.name}"
+    local_path = f"data/{data.path}/{data.name}" if data.name is not None else f"data/{data.path}"
     try:
         datadict = load_from_disk(local_path)
     except FileNotFoundError:
-        datadict = load_dataset(data.path, data.name)
+        datadict = load_dataset(data.path, data.name, trust_remote_code=True)
         datadict.save_to_disk(local_path)
 
     dataset = datadict[split]

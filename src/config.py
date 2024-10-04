@@ -18,7 +18,7 @@ class DataConfig(BaseConfig):
     subset_size: float = 1.0
 
 class OptimizerConfig(BaseConfig):
-    lr: float = 4e-4
+    lr: float = 6e-4
     decay: float = 0.1
     betas: list[float] = [0.9, 0.95]
     
@@ -26,12 +26,13 @@ class SchedulerConfig(BaseConfig):
     enable: bool = False
     warmup_steps: int = 100
     num_cycles: float = 0.5
+    min_lr_factor: float = 0.1
     last_epoch: int = -1
 
 class TrainConfig(BaseConfig):
-    max_epochs: int = -1
-    max_steps: int = 10000
-    batch_size: int = 16
+    max_epochs: int = 3
+    max_steps: int = -1
+    batch_size: int = 32
     seed: int = 42
 
     optimizer: OptimizerConfig = OptimizerConfig()
