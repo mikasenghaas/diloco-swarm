@@ -1,12 +1,16 @@
+import time
+from functools import wraps
 import torch
 import numpy as np
+from tqdm import tqdm
 from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import ModelConfig, TokenizerConfig, DataConfig, LoggingConfig
-from .logger import Logger
+from .logger import CustomLogger
+from .metrics import Metrics
 
 from typing import List, Dict, Any
 
@@ -24,6 +28,9 @@ def get_device() -> torch.device:
         return torch.device("mps")
     else:
         return torch.device("cpu")
+
+def get_logger(logging: LoggingConfig) -> CustomLogger:
+    return CustomLogger(logging)
 
 def get_model(model: ModelConfig) -> AutoModelForCausalLM:
     return AutoModelForCausalLM.from_pretrained(model.name)
@@ -47,9 +54,6 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
     return cycle_iter(dataloader) if cycle else iter(dataloader)
 
-def get_logger(logging: LoggingConfig) -> Logger:
-    return Logger(logging)
-
 def non_empty_text(examples: Dict[str, Any]) -> bool:
     return examples["text"] != ""
 
@@ -58,3 +62,34 @@ def non_headline(examples: Dict[str, Any]) -> bool:
 
 def tokenize(examples: Dict[str, Any], tokenizer: AutoTokenizer, max_length: int) -> Dict[str, Any]:
     return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=max_length+1)
+
+def get_train_pbar_description(metrics: Metrics, prefix: str):
+    curr_metrics = metrics.compute()
+    step = curr_metrics.get(f"{metrics.name}/step/current")
+    loss = curr_metrics.get(f"{metrics.name}/loss/average")
+    perplexity = curr_metrics.get(f"{metrics.name}/perplexity/average")
+    throughput = curr_metrics.get(f"{metrics.name}/throughput/current")
+    return f"{prefix} Step: {step}, Avg. Loss: {loss:.4f}, Avg. Perplexity: {perplexity:.1f}, Throughput: {throughput:.1f}"
+
+def get_eval_pbar_description(metrics: Metrics, prefix: str):
+    curr_metrics = metrics.compute()
+    loss = curr_metrics.get(f"{metrics.name}/loss/average")
+    perplexity = curr_metrics.get(f"{metrics.name}/perplexity/average")
+    return f"{prefix} Avg. Loss: {loss:.4f}, Avg. Perplexity: {perplexity:.1f}"
+
+def track_time(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        
+        if isinstance(result, dict):
+            result['time'] = end_time - start_time
+        else:
+            result = {'result': result, 'time': end_time - start_time}
+        
+        return result
+    
+    return wrapper
+
