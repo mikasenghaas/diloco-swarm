@@ -105,3 +105,13 @@ def get_num_steps(max_steps: int, max_epochs: int, num_examples: int, batch_size
     if max_epochs == -1: return max_steps
     elif max_steps == -1: return max_steps_epoch
     else: return min(max_steps, max_steps_epoch)
+
+def format_int(num: int, prec: int = 1) -> str:
+    if num < 1e3:
+        return str(num)
+    if num < 1e6:
+        return f"{num/1e3:.{prec}f}K"
+    if num < 1e9:
+        return f"{num/1e6:.{prec}f}M"
+    else:
+        return f"{num/1e9:.{prec}f}B"

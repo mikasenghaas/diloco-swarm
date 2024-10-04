@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, format_int
 from pydantic import validate_call
 from pydantic_config import parse_argv
 from src.config import Config
@@ -63,24 +63,24 @@ def main(config: Config):
 
     # Load model
     model = get_model(config.model)
-    logger.log_message(f"Loaded model '{config.model.name}' ({model.num_parameters() / 1e6:.1f}M parameters)")
+    logger.log_message(f"Loaded model '{config.model.name}' ({format_int(model.num_parameters(), 2)} parameters)")
 
     # Load tokenizer
     tokenizer = get_tokenizer(config.tokenizer)
     tokenizer.pad_token = tokenizer.eos_token
-    logger.log_message(f"Loaded tokenizer '{config.tokenizer.name}' ({len(tokenizer) / 1e3:.1f}K tokens)")
+    logger.log_message(f"Loaded tokenizer '{config.tokenizer.name}' ({format_int(len(tokenizer), 0)} tokens)")
 
     # Load and split dataset
     train_data = get_dataset(config.data, split="train")
     val_data = get_dataset(config.data, split="validation")
     test_data = get_dataset(config.data, split="test")
-    logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {len(train_data)} train, {len(val_data)} validation, {len(test_data)} test examples")
+    logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
     train_data = train_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
     val_data = val_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
     test_data = test_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
-    logger.log_message(f"Tokenized dataset with {len(train_data)} train, {len(val_data)} validation, {len(test_data)} test examples")
+    logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=True, cycle=True)
@@ -92,9 +92,9 @@ def main(config: Config):
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
     num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.eval.batch_size)
     num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
-    logger.log_message(f"Train setup:\tSteps: {num_train_steps}\tBatch Size: {config.train.batch_size}\tExamples: {num_train_steps * config.train.batch_size}\t Tokens: {num_train_steps * config.train.batch_size * config.data.seq_length}\t Fraction of Data: {num_train_steps * config.train.batch_size / len(train_data):.2f}")
-    logger.log_message(f"Eval setup:\tSteps: {num_eval_steps}\tBatch Size: {config.eval.batch_size}\tExamples: {num_eval_steps * config.eval.batch_size}\t Tokens: {num_eval_steps * config.eval.batch_size * config.data.seq_length}\t Fraction of Data: {num_eval_steps * config.eval.batch_size / len(val_data):.2f}")
-    logger.log_message(f"Test setup:\tSteps: {num_test_steps}\tBatch Size: {config.eval.batch_size}\tExamples: {num_test_steps * config.eval.batch_size}\t Tokens: {num_test_steps * config.eval.batch_size * config.data.seq_length}\t Fraction of Data: {num_test_steps * config.eval.batch_size / len(test_data):.2f}")
+    logger.log_message(f"Train setup:\tSteps: {format_int(num_train_steps, 0)}\tBatch Size: {config.train.batch_size}\tExamples: {format_int(num_train_steps * config.train.batch_size, 0)}\t Tokens: {format_int(num_train_steps * config.train.batch_size * config.data.seq_length, 0)}\t Fraction of Data: {num_train_steps * config.train.batch_size / len(train_data):.2f}")
+    logger.log_message(f"Eval setup:\tSteps: {format_int(num_eval_steps, 0)}\tBatch Size: {config.eval.batch_size}\tExamples: {format_int(num_eval_steps * config.eval.batch_size, 0)}\t Tokens: {format_int(num_eval_steps * config.eval.batch_size * config.data.seq_length, 0)}\t Fraction of Data: {num_eval_steps * config.eval.batch_size / len(val_data):.2f}")
+    logger.log_message(f"Test setup:\tSteps: {format_int(num_test_steps, 0)}\tBatch Size: {config.eval.batch_size}\tExamples: {format_int(num_test_steps * config.eval.batch_size, 0)}\t Tokens: {format_int(num_test_steps * config.eval.batch_size * config.data.seq_length, 0)}\t Fraction of Data: {num_test_steps * config.eval.batch_size / len(test_data):.2f}")
 
     # Set up optimizer
     optimizer = get_optimizer(config.train, model)
@@ -136,7 +136,7 @@ def main(config: Config):
         if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
             logger.log_checkpoint(model, tokenizer, train_step)
 
-    # Evaluate
+    # Test
     if config.eval.enable:
         test_metrics = Metrics([Loss(), Perplexity()], name="test")
         num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
@@ -152,7 +152,7 @@ def main(config: Config):
         curr_metrics = test_metrics.compute()
         logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
 
-    # Checkpoint
+    # Final Checkpoint
     if config.logging.ckpt.enable:
         logger.log_checkpoint(model, tokenizer, train_step)
 
