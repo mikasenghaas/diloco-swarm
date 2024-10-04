@@ -16,22 +16,23 @@ class DataConfig(BaseConfig):
     seq_length: int = 128
     num_workers: int = 1
     subset_size: float = 1.0
+    cycle: bool = True
     
 class TrainConfig(BaseConfig):
     seed: int = 42
 
     warmup_steps: int = 1000
-    max_steps: int = 100
-    batch_size: int = 4
+    max_steps: int = 10000
+    batch_size: int = 8
 
     lr: float = 4e-4
     weight_decay: float = 0.1
-    adam_betas: tuple[float, float] = (0.9, 0.95)
+    adam_betas: list[float] = [0.9, 0.95]
 
 class EvalConfig(BaseConfig):
     enable: bool = True
-    every_n_steps: int = 10
-    max_steps: int = 100
+    every_n_steps: int = 100
+    max_steps: int = 1000
     batch_size: int = 1
 
 class ConsoleLoggingConfig(BaseConfig):
@@ -39,17 +40,19 @@ class ConsoleLoggingConfig(BaseConfig):
     log_level: str = "INFO"
 
 class FileLoggingConfig(BaseConfig):
-    enable: bool = False
-    path: str = "logs"
+    enable: bool = True
     log_level: str = "DEBUG"
+    name: str = "output.log"
 
 class WandbLoggingConfig(BaseConfig):
     enable: bool = False
     entity: str | None = "mikasenghaas"
     project: str | None = "swarm"
+    group: str | None = None
     run_name: str | None = None
 
 class LoggingConfig(BaseConfig):
+    log_dir: str = "logs"
     console: ConsoleLoggingConfig = ConsoleLoggingConfig()
     file: FileLoggingConfig = FileLoggingConfig()
     wandb: WandbLoggingConfig = WandbLoggingConfig()
@@ -64,13 +67,23 @@ class Config(BaseConfig):
 
 
 if __name__ == "__main__":
+    from rich.pretty import pprint as rpprint
+    from pprint import pprint
+    import yaml
+
     class TestConfig(BaseConfig):
         model: ModelConfig = ModelConfig()
         tokenizer: TokenizerConfig = TokenizerConfig()
         data: DataConfig = DataConfig()
-        training: TrainConfig = TrainConfig()
+        train: TrainConfig = TrainConfig()
         eval: EvalConfig = EvalConfig()
         logging: LoggingConfig = LoggingConfig()
 
     config = TestConfig(**parse_argv())
-    print(config)
+    config_dict = config.model_dump()
+
+    pprint(config_dict)
+    print("\n")
+    rpprint(config_dict, expand_all=True)
+    print("\n")
+    print(yaml.dump(config_dict, sort_keys=False))
