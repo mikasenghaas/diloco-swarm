@@ -129,6 +129,21 @@ def main(config: Config):
             curr_metrics = eval_metrics.compute()
             logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
 
+    # Evaluate
+    if config.test.enable:
+        test_metrics = Metrics([Loss(), Perplexity()], name="test")
+        test_bar = tqdm(range(1, len(test_dataloader)+1), position=0, leave=True)
+        for test_step in test_bar:
+            batch = next(test_dataloader)
+            outputs = eval(test_step, model, batch, device)
+
+            # Compute and log metrics
+            test_metrics.update(outputs)
+            test_bar.set_description(get_eval_pbar_description(test_metrics, prefix="[TEST]"))
+
+        curr_metrics = test_metrics.compute()
+        logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
+
     logger.log_message("Finished training!")
     logger.close()
 

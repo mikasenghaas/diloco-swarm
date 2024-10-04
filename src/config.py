@@ -38,10 +38,14 @@ class TrainConfig(BaseConfig):
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
 
-class EvalConfig(BaseConfig):
-    enable: bool = True
+class ValidationConfig(BaseConfig):
+    enable: bool = False
     every_n_steps: int = 100
-    max_steps: int = 1000
+    max_steps: int = 100
+    batch_size: int = 1
+
+class TestConfig(BaseConfig):
+    enable: bool = False
     batch_size: int = 1
 
 class ConsoleLoggingConfig(BaseConfig):
@@ -71,7 +75,8 @@ class Config(BaseConfig):
     tokenizer: TokenizerConfig = TokenizerConfig()
     data: DataConfig = DataConfig()
     train: TrainConfig = TrainConfig()
-    eval: EvalConfig = EvalConfig()
+    val: ValidationConfig = ValidationConfig()
+    test: TestConfig = TestConfig()
     logging: LoggingConfig = LoggingConfig()
 
 
@@ -85,7 +90,8 @@ if __name__ == "__main__":
         tokenizer: TokenizerConfig = TokenizerConfig()
         data: DataConfig = DataConfig()
         train: TrainConfig = TrainConfig()
-        eval: EvalConfig = EvalConfig()
+        val: ValidationConfig = ValidationConfig()
+        test: TestConfig = TestConfig()
         logging: LoggingConfig = LoggingConfig()
 
     config = TestConfig(**parse_argv())
