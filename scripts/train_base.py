@@ -6,20 +6,21 @@ import time
 from typing import Dict
 
 import torch
-from torch.optim import AdamW, Optimizer
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from transformers import AutoModelForCausalLM
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, non_empty_text, non_headline, tokenize, track_time, get_train_pbar_description, get_eval_pbar_description
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description
 from pydantic import validate_call
 from pydantic_config import parse_argv
 from src.config import Config
 from src.logger import Level
-from src.metrics import Step, ExamplesSeen, TokensSeen, Loss, Perplexity, Throughput, Metrics
+from src.metrics import Outputs, Step, ExamplesSeen, TokensSeen, Loss, Perplexity, Throughput, LearningRate, Metrics
 
-@track_time
-def train(model: AutoModelForCausalLM, optimizer: Optimizer, batch: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
+def train(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
+    start = time.time()
     model.train()
     model.to(device)
     optimizer.zero_grad()
@@ -31,18 +32,21 @@ def train(model: AutoModelForCausalLM, optimizer: Optimizer, batch: Dict[str, to
     outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
     outputs.loss.backward()
     optimizer.step()
+    scheduler.step()
 
-    return outputs
+    return Outputs(step=step, lr=scheduler.get_last_lr()[0], loss=outputs.loss, logits=outputs.logits, time=time.time() - start)
 
-@track_time
-def eval(model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
+def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Outputs:
+    start = time.time()
     model.eval()
     with torch.no_grad():
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
-        return model(input_ids, attention_mask=attention_mask, labels=labels)
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+
+        return Outputs(step=step, loss=outputs.loss, logits=outputs.logits, time=time.time() - start)
 
 @validate_call
 def main(config: Config):
@@ -80,23 +84,27 @@ def main(config: Config):
     
     # Prepare data loaders
     train_dataloader = get_dataloader(train_data_tok, batch_size=config.train.batch_size, shuffle=True, cycle=config.data.cycle)
-    val_dataloader = get_dataloader(val_data_tok, batch_size=config.eval.batch_size, shuffle=True, cycle=config.data.cycle)
-    test_dataloader = get_dataloader(test_data_tok, batch_size=config.eval.batch_size, shuffle=False, cycle=False)
+    val_dataloader = get_dataloader(val_data_tok, batch_size=config.val.batch_size, shuffle=True, cycle=config.data.cycle)
+    test_dataloader = get_dataloader(test_data_tok, batch_size=config.test.batch_size, shuffle=False, cycle=False)
     logger.log_message(f"Prepared dataloaders")
+    
+    # Compute number of training batches
+    epoch_train_batches = len(train_data) // config.train.batch_size
+    num_batches = min(epoch_train_batches, config.train.max_steps)
 
     # Set up optimizer
-    optimizer = AdamW(model.parameters(), lr=config.train.lr, weight_decay=config.train.weight_decay, betas=config.train.adam_betas)
+    optimizer = get_optimizer(config.train, model)
+    scheduler = get_scheduler(config.train, optimizer, num_batches)
 
     # Start Training
     logger.log_message("Starting training")
-    train_metrics = Metrics([Step(), ExamplesSeen(), TokensSeen(), Loss(), Perplexity(), Throughput()], name="train")
+    train_metrics = Metrics([Step(), ExamplesSeen(), TokensSeen(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
-    num_train_batches = len(train_data) // config.train.batch_size
-    train_bar = tqdm(range(1, min(num_train_batches, config.train.max_steps)+1), position=0, leave=True)
+    train_bar = tqdm(range(1, num_batches+1), position=0, leave=True)
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
-        outputs = train(model, optimizer, batch, device)
+        outputs = train(train_step, model, batch, optimizer, scheduler, device)
         
         # Compute and log metrics
         train_metrics.update(outputs)
@@ -104,19 +112,19 @@ def main(config: Config):
         logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
         train_bar.set_description(get_train_pbar_description(train_metrics, prefix="[TRAIN]"))
 
-        # Evaluate
-        if config.eval.enable and train_step % config.eval.every_n_steps == 0:
-            num_eval_batches = len(val_data) // config.eval.batch_size
-            eval_bar = tqdm(range(1, min(num_eval_batches, config.eval.max_steps)+1), position=1, leave=False)
+        # Validate
+        if config.val.enable and train_step % config.val.every_n_steps == 0:
+            num_eval_batches = len(val_data) // config.val.batch_size
+            eval_bar = tqdm(range(1, min(num_eval_batches, config.val.max_steps)+1), position=1, leave=False)
             eval_metrics.reset()
-            for _ in eval_bar:
+            for val_step in eval_bar:
                 # Eval step
                 batch = next(val_dataloader)
-                outputs = eval(model, batch, device)
+                outputs = eval(val_step, model, batch, device)
 
                 # Compute and log metrics
                 eval_metrics.update(outputs)
-                eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL ]"))
+                eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[VAL]"))
 
             curr_metrics = eval_metrics.compute()
             logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)

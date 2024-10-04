@@ -4,9 +4,11 @@ from pydantic import BaseModel, ConfigDict
 from abc import ABC, abstractmethod
 
 class Outputs(BaseModel):
+    step: int
     time: float
     loss: torch.Tensor
     logits: torch.Tensor
+    lr: float | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -110,6 +112,19 @@ class Throughput(Metric):
     def reset(self):
         self.throughputs = []
 
+class LearningRate(Metric):
+    __name__ = "learning_rate"
+    def __init__(self):
+        self.learning_rates: List[float] = []
+
+    def update(self, outputs: Outputs):
+        self.learning_rates.append(outputs.lr)
+
+    def compute(self) -> Dict[str, float]:
+        return {"current": self.learning_rates[-1]}
+
+    def reset(self):
+        self.learning_rates = []
 
 class Metrics:
     def __init__(self, metrics: List[Metric], name: str):

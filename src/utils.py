@@ -1,14 +1,16 @@
+import math
 import time
 from functools import wraps
 import torch
 import numpy as np
-from tqdm import tqdm
 from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.optim.lr_scheduler import LambdaLR
+from torch.optim import AdamW
 
-from .config import ModelConfig, TokenizerConfig, DataConfig, LoggingConfig
+from .config import ModelConfig, TokenizerConfig, DataConfig, LoggingConfig, SchedulerConfig, OptimizerConfig, TrainConfig
 from .logger import CustomLogger
 from .metrics import Metrics
 
@@ -37,6 +39,19 @@ def get_model(model: ModelConfig) -> AutoModelForCausalLM:
 
 def get_tokenizer(tokenizer: TokenizerConfig) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(tokenizer.name, fast=tokenizer.fast)
+
+def get_optimizer(train: TrainConfig, model: AutoModelForCausalLM) -> AdamW:
+    return AdamW(model.parameters(), lr=train.optimizer.lr, weight_decay=train.optimizer.decay, betas=train.optimizer.betas)
+
+def get_scheduler(train: TrainConfig, optimizer: AdamW, num_batches: int) -> LambdaLR:
+    if train.scheduler.enable:
+        def lr_lambda(step, warmup_steps, num_batches, num_cycles):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            progress = float(step - warmup_steps) / float(max(1, num_batches - warmup_steps))
+            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
+        return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_batches, train.scheduler.num_cycles), last_epoch=train.scheduler.last_epoch)
+    return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
     dataset = load_dataset(data.path, data.name, split=split)
@@ -76,20 +91,3 @@ def get_eval_pbar_description(metrics: Metrics, prefix: str):
     loss = curr_metrics.get(f"{metrics.name}/loss/average")
     perplexity = curr_metrics.get(f"{metrics.name}/perplexity/average")
     return f"{prefix} Avg. Loss: {loss:.4f}, Avg. Perplexity: {perplexity:.1f}"
-
-def track_time(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        
-        if isinstance(result, dict):
-            result['time'] = end_time - start_time
-        else:
-            result = {'result': result, 'time': end_time - start_time}
-        
-        return result
-    
-    return wrapper
-

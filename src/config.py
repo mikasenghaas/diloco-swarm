@@ -17,17 +17,26 @@ class DataConfig(BaseConfig):
     num_workers: int = 1
     subset_size: float = 1.0
     cycle: bool = True
+
+class OptimizerConfig(BaseConfig):
+    lr: float = 4e-4
+    decay: float = 0.1
+    betas: list[float] = [0.9, 0.95]
     
+class SchedulerConfig(BaseConfig):
+    enable: bool = True
+    warmup_steps: int = 100
+    num_cycles: float = 0.5
+    last_epoch: int = -1
+
 class TrainConfig(BaseConfig):
     seed: int = 42
 
-    warmup_steps: int = 1000
     max_steps: int = 10000
     batch_size: int = 8
 
-    lr: float = 4e-4
-    weight_decay: float = 0.1
-    adam_betas: list[float] = [0.9, 0.95]
+    optimizer: OptimizerConfig = OptimizerConfig()
+    scheduler: SchedulerConfig = SchedulerConfig()
 
 class EvalConfig(BaseConfig):
     enable: bool = True
