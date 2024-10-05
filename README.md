@@ -4,9 +4,22 @@ This repository is a re-implementation and benchmark of [SWARM](https://arxiv.or
 
 ## Remote Setup
 
+First, copy the `.env` file to the server and ssh into it.
+
 ```bash
-PERSISTENT_DIR=/workspace
+USER=<user>
+HOST=<host>
+PORT=<port>
+PERSISTENT_DIR=<persistent_dir>
+
+scp -P $PORT -i ~/.ssh/primeintellect .env $USER@$HOST:$PERSISTENT_DIR/.env
+ssh $USER@$HOST -p $PORT -i ~/.ssh/primeintellect
+```
+
+Then, clone the repository and run the setup script.
+
+```bash
 git clone https://github.com/mikasenghaas/swarm.git $PERSISTENT_DIR/swarm
-scp .env <user>@<host>:$PERSISTENT_DIR/swarm/.env
+mv $PERSISTENT_DIR/.env $PERSISTENT_DIR/swarm/.env
 bash $PERSISTENT_DIR/swarm/scripts/setup.sh
 ```
