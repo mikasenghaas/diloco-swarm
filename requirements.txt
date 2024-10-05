@@ -7,4 +7,5 @@ jupyter
 ipywidgets
 pandas
 matplotlib
+wandb
 git+https://github.com/samsja/pydantic_config
