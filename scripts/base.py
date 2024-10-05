@@ -13,23 +13,26 @@ from transformers import AutoModelForCausalLM
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float
+from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_autocast_context
 from pydantic import validate_call
 from pydantic_config import parse_argv
 from src.config import Config
 from src.logger import Level
 from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 
-def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, batch_loader: Dict[str, torch.Tensor], optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
+def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
     optimizer.zero_grad()
     batch_loss = torch.Tensor([0.0]).to(device)
     batch_tokens, batch_examples = 0, 0
+
+    autocast = get_autocast_context(device)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        outputs = model(micro_batch["input_ids"], attention_mask=micro_batch["attention_mask"], labels=micro_batch["labels"])
+        with autocast:
+            outputs = model(micro_batch["input_ids"], attention_mask=micro_batch["attention_mask"], labels=micro_batch["labels"])
         outputs.loss /= grad_accumulation_steps
         outputs.loss.backward()
 
@@ -56,7 +59,8 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
 
 @validate_call
 def main(config: Config):
-    # Set seed
+    # Set precision and seed
+    set_precision(config.train.precision)
     seed_everything(config.train.seed)
 
     # Get logger

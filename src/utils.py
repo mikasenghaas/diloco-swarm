@@ -2,7 +2,7 @@ import math
 import torch
 import numpy as np
 from itertools import cycle as cycle_iter
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -13,6 +13,9 @@ from .logger import CustomLogger
 from .metrics import Metrics
 
 from typing import List, Dict, Any
+    
+def set_precision(precision: str):
+    torch.set_float32_matmul_precision(precision)
 
 def seed_everything(seed: int):
     torch.manual_seed(seed)
@@ -144,6 +147,20 @@ def get_train_setup(steps: int, batch_size: int, seq_length: int, micro_batch_si
         "avg_token_repetitions": avg_token_repetitions,
         "grad_accumulation_steps": grad_accumulation_steps,
     }
+
+def get_autocast_context(device: torch.device) -> torch.autocast:
+    class NoAutocast:
+        def __enter__(self):
+            pass
+
+        def __exit__(self, *args):
+            pass
+
+    return (
+        torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+        if device.type != 'mps'
+        else NoAutocast()
+    )
 
 def format_int(num: int, prec: int = 2) -> str:
     if num < 1e3:

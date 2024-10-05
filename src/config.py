@@ -34,6 +34,7 @@ class TrainConfig(BaseConfig):
     max_steps: int = 10
     micro_batch_size: int = 32
     batch_size: int = 32
+    precision: str = "high"
     seed: int = 42
     norm: float = 1.0
 
