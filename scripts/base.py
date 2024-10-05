@@ -20,18 +20,15 @@ from src.config import Config
 from src.logger import Level
 from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 
-def train(grad_accumulation_steps: int, micro_batch_size: int,step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
+def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, batch_loader: Dict[str, torch.Tensor], optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
     optimizer.zero_grad()
     batch_loss = torch.Tensor([0.0]).to(device)
     batch_tokens, batch_examples = 0, 0
-    for micro_step in range(grad_accumulation_steps):
-        # micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        start_idx = micro_step * micro_batch_size
-        end_idx = start_idx + micro_batch_size
-        micro_batch = {k: v[start_idx:end_idx].to(device) for k, v in batch.items()}
+    for micro_batch in batch_loader:
+        micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
         outputs = model(micro_batch["input_ids"], attention_mask=micro_batch["attention_mask"], labels=micro_batch["labels"])
         outputs.loss /= grad_accumulation_steps
         outputs.loss.backward()
@@ -52,8 +49,10 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
     batch = {k: v.to(device) for k, v in batch.items()}
     with torch.no_grad():
         outputs = model(batch["input_ids"], attention_mask=batch["attention_mask"], labels=batch["labels"])
+        num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
+        num_examples = batch["input_ids"].shape[0]
 
-        return Outputs(step=step, loss=outputs.loss, tokens_processed=batch["input_ids"].shape[0] * batch["input_ids"].shape[1], time=time.time() - start)
+        return Outputs(step=step, loss=outputs.loss, num_tokens=num_tokens, num_examples=num_examples, time=time.time() - start)
 
 @validate_call
 def main(config: Config):
@@ -121,8 +120,8 @@ def main(config: Config):
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
-        micro_dataloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(grad_accumulation_steps, config.train.micro_batch_size, train_step, model, batch, optimizer, scheduler, device)
+        micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
+        outputs = train(grad_accumulation_steps, train_step, model, micro_batchloader, optimizer, scheduler, device)
         
         # Compute and log metrics
         train_metrics.update(outputs)
