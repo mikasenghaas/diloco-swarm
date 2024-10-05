@@ -8,6 +8,7 @@ class Outputs(BaseModel):
     time: float
     loss: torch.Tensor
     logits: torch.Tensor
+    norm: float | None = None
     lr: float | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -39,7 +40,7 @@ class Step(Metric):
     def reset(self):
         self.step = 0
 
-class ExamplesSeen(Metric):
+class Examples(Metric):
     __name__ = "examples"
     def __init__(self):
         self.num_examples : List[int] = []
@@ -53,7 +54,7 @@ class ExamplesSeen(Metric):
     def reset(self):
         self.num_examples = []
 
-class TokensSeen(Metric):
+class Tokens(Metric):
     __name__ = "tokens"
     def __init__(self):
         self.num_tokens : List[int] = []
@@ -66,6 +67,20 @@ class TokensSeen(Metric):
 
     def reset(self):
         self.num_tokens = []
+
+class Norm(Metric):
+    __name__ = "norm"
+    def __init__(self):
+        self.norms : List[float] = []
+
+    def update(self, outputs: Outputs):
+        self.norms.append(outputs.norm)
+
+    def compute(self) -> Dict[str, float]:
+        return {"current": self.norms[-1]}
+
+    def reset(self):
+        self.norms = []
 
 class Loss(Metric):
     __name__ = "loss"

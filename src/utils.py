@@ -2,7 +2,7 @@ import math
 import torch
 import numpy as np
 from itertools import cycle as cycle_iter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -75,6 +75,27 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
     return cycle_iter(dataloader) if cycle else iter(dataloader)
+
+def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) -> DataLoader:
+    """Create a DataLoader for micro-batches from a single large batch."""
+    class MicroBatchDataset(Dataset):
+        def __init__(self, input_ids, attention_mask, labels):
+            self.input_ids = input_ids
+            self.attention_mask = attention_mask
+            self.labels = labels
+
+        def __len__(self):
+            return len(self.input_ids)
+
+        def __getitem__(self, idx):
+            return {
+                'input_ids': self.input_ids[idx],
+                'attention_mask': self.attention_mask[idx],
+                'labels': self.labels[idx]
+            }
+
+    dataset = MicroBatchDataset(batch['input_ids'], batch['attention_mask'], batch['labels'])
+    return DataLoader(dataset, batch_size=micro_batch_size, shuffle=False)
 
 def non_empty_text(examples: Dict[str, Any]) -> bool:
     return examples["text"] != ""

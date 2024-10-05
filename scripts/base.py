@@ -8,43 +8,45 @@ from typing import Dict
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, format_int
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, format_int
 from pydantic import validate_call
 from pydantic_config import parse_argv
 from src.config import Config
 from src.logger import Level
-from src.metrics import Outputs, Step, ExamplesSeen, TokensSeen, Loss, Perplexity, Throughput, LearningRate, Metrics
+from src.metrics import Outputs, Step, Examples, Tokens, Loss, Perplexity, Throughput, LearningRate, Metrics
 
-def train(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
+def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, micro_data_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
     optimizer.zero_grad()
+    all_loss = torch.Tensor([0.0]).to(device)
+    all_logits = torch.Tensor([]).to(device)
+    for micro_batch in micro_data_loader:
+        micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
+        outputs = model(micro_batch["input_ids"], attention_mask=micro_batch["attention_mask"], labels=micro_batch["labels"])
+        outputs.loss /= grad_accumulation_steps
+        outputs.loss.backward()
 
-    input_ids = batch["input_ids"].to(device)
-    attention_mask = batch["attention_mask"].to(device)
-    labels = batch["labels"].to(device)
+        all_loss += outputs.loss.detach()
+        all_logits = torch.cat([all_logits, outputs.logits.detach()], dim=0)
 
-    outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-    outputs.loss.backward()
     optimizer.step()
     scheduler.step()
 
-    return Outputs(step=step, lr=scheduler.get_last_lr()[0], loss=outputs.loss, logits=outputs.logits, time=time.time() - start)
+    return Outputs(step=step, lr=scheduler.get_last_lr()[0], loss=all_loss, logits=all_logits, time=time.time() - start)
 
 def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Outputs:
     start = time.time()
     model.eval()
+    batch = {k: v.to(device) for k, v in batch.items()}
     with torch.no_grad():
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
-
-        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        outputs = model(batch["input_ids"], attention_mask=batch["attention_mask"], labels=batch["labels"])
 
         return Outputs(step=step, loss=outputs.loss, logits=outputs.logits, time=time.time() - start)
 
@@ -92,9 +94,15 @@ def main(config: Config):
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
     num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.eval.batch_size)
     num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
+    # TODO: Show total steps/examples/tokens, then examples/tokens per step (function of B*L)
     logger.log_message(f"Train setup:\tSteps: {format_int(num_train_steps, 0)}\tBatch Size: {config.train.batch_size}\tExamples: {format_int(num_train_steps * config.train.batch_size, 0)}\t Tokens: {format_int(num_train_steps * config.train.batch_size * config.data.seq_length, 0)}\t Fraction of Data: {num_train_steps * config.train.batch_size / len(train_data):.2f}")
     logger.log_message(f"Eval setup:\tSteps: {format_int(num_eval_steps, 0)}\tBatch Size: {config.eval.batch_size}\tExamples: {format_int(num_eval_steps * config.eval.batch_size, 0)}\t Tokens: {format_int(num_eval_steps * config.eval.batch_size * config.data.seq_length, 0)}\t Fraction of Data: {num_eval_steps * config.eval.batch_size / len(val_data):.2f}")
     logger.log_message(f"Test setup:\tSteps: {format_int(num_test_steps, 0)}\tBatch Size: {config.eval.batch_size}\tExamples: {format_int(num_test_steps * config.eval.batch_size, 0)}\t Tokens: {format_int(num_test_steps * config.eval.batch_size * config.data.seq_length, 0)}\t Fraction of Data: {num_test_steps * config.eval.batch_size / len(test_data):.2f}")
+
+    # Compute grad accumulation steps
+    grad_accumulation_steps = config.train.batch_size // config.train.micro_batch_size
+    assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
+    logger.log_message(f"Gradient Accumulation Steps: {grad_accumulation_steps}")
 
     # Set up optimizer
     optimizer = get_optimizer(config.train, model)
@@ -102,13 +110,14 @@ def main(config: Config):
 
     # Start Training
     logger.log_message("Starting training")
-    train_metrics = Metrics([Step(), ExamplesSeen(), TokensSeen(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
+    train_metrics = Metrics([Step(), Examples(), Tokens(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
     train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
-        outputs = train(train_step, model, batch, optimizer, scheduler, device)
+        micro_dataloader = get_micro_dataloader(batch, config.train.micro_batch_size)
+        outputs = train(grad_accumulation_steps, train_step, model, micro_dataloader, optimizer, scheduler, device)
         
         # Compute and log metrics
         train_metrics.update(outputs)

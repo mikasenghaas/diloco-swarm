@@ -30,8 +30,9 @@ class SchedulerConfig(BaseConfig):
     last_epoch: int = -1
 
 class TrainConfig(BaseConfig):
-    max_epochs: int = 3
-    max_steps: int = -1
+    max_epochs: int = 1
+    max_steps: int = 10
+    micro_batch_size: int = 32
     batch_size: int = 32
     seed: int = 42
 
@@ -39,14 +40,14 @@ class TrainConfig(BaseConfig):
     scheduler: SchedulerConfig = SchedulerConfig()
 
 class EvalConfig(BaseConfig):
-    enable: bool = True
+    enable: bool = False
     every_n_steps: int = -1
     max_epochs: int = 1
     max_steps: int = -1
     batch_size: int = 1
 
 class CheckpointingConfig(BaseConfig):
-    enable: bool = True
+    enable: bool = False
     every_n_steps: int = -1
 
 class ConsoleLoggingConfig(BaseConfig):
