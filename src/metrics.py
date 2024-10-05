@@ -7,7 +7,8 @@ class Outputs(BaseModel):
     step: int
     time: float
     loss: torch.Tensor
-    logits: torch.Tensor
+    num_tokens: int
+    num_examples: int
     norm: float | None = None
     lr: float | None = None
 
@@ -46,7 +47,7 @@ class Examples(Metric):
         self.num_examples : List[int] = []
 
     def update(self, outputs: Outputs):
-        self.num_examples.append(outputs.logits.shape[0])
+        self.num_examples.append(outputs.num_examples)
 
     def compute(self) -> Dict[str, float]:
         return {"current": self.num_examples[-1], "total": sum(self.num_examples)}
@@ -60,7 +61,7 @@ class Tokens(Metric):
         self.num_tokens : List[int] = []
 
     def update(self, outputs: Outputs):
-        self.num_tokens.append(outputs.logits.shape[0] * outputs.logits.shape[1])
+        self.num_tokens.append(outputs.num_tokens)
 
     def compute(self) -> Dict[str, float]:
         return {"current": self.num_tokens[-1], "total": sum(self.num_tokens)}
@@ -116,8 +117,7 @@ class Throughput(Metric):
         self.throughputs : List[float] = []
 
     def update(self, outputs: Outputs):
-        num_tokens = outputs.logits.shape[0] * outputs.logits.shape[1]
-        throughput = num_tokens / outputs.time
+        throughput = outputs.num_tokens / outputs.time
 
         self.throughputs.append(throughput)
 

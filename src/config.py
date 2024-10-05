@@ -35,6 +35,7 @@ class TrainConfig(BaseConfig):
     micro_batch_size: int = 32
     batch_size: int = 32
     seed: int = 42
+    norm: float = 1.0
 
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()

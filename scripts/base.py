@@ -18,28 +18,33 @@ from pydantic import validate_call
 from pydantic_config import parse_argv
 from src.config import Config
 from src.logger import Level
-from src.metrics import Outputs, Step, Examples, Tokens, Loss, Perplexity, Throughput, LearningRate, Metrics
+from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 
-def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, micro_data_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
+def train(grad_accumulation_steps: int, micro_batch_size: int,step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
     optimizer.zero_grad()
-    all_loss = torch.Tensor([0.0]).to(device)
-    all_logits = torch.Tensor([]).to(device)
-    for micro_batch in micro_data_loader:
-        micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
+    batch_loss = torch.Tensor([0.0]).to(device)
+    batch_tokens, batch_examples = 0, 0
+    for micro_step in range(grad_accumulation_steps):
+        # micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
+        start_idx = micro_step * micro_batch_size
+        end_idx = start_idx + micro_batch_size
+        micro_batch = {k: v[start_idx:end_idx].to(device) for k, v in batch.items()}
         outputs = model(micro_batch["input_ids"], attention_mask=micro_batch["attention_mask"], labels=micro_batch["labels"])
         outputs.loss /= grad_accumulation_steps
         outputs.loss.backward()
 
-        all_loss += outputs.loss.detach()
-        all_logits = torch.cat([all_logits, outputs.logits.detach()], dim=0)
+        batch_loss += outputs.loss.detach()
+        batch_examples += micro_batch["input_ids"].shape[0]
+        batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     scheduler.step()
 
-    return Outputs(step=step, lr=scheduler.get_last_lr()[0], loss=all_loss, logits=all_logits, time=time.time() - start)
+    return Outputs(step=step, lr=scheduler.get_last_lr()[0], loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=time.time() - start)
 
 def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Outputs:
     start = time.time()
@@ -48,7 +53,7 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
     with torch.no_grad():
         outputs = model(batch["input_ids"], attention_mask=batch["attention_mask"], labels=batch["labels"])
 
-        return Outputs(step=step, loss=outputs.loss, logits=outputs.logits, time=time.time() - start)
+        return Outputs(step=step, loss=outputs.loss, tokens_processed=batch["input_ids"].shape[0] * batch["input_ids"].shape[1], time=time.time() - start)
 
 @validate_call
 def main(config: Config):
@@ -110,14 +115,14 @@ def main(config: Config):
 
     # Start Training
     logger.log_message("Starting training")
-    train_metrics = Metrics([Step(), Examples(), Tokens(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
+    train_metrics = Metrics([Step(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
     train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
         micro_dataloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(grad_accumulation_steps, train_step, model, micro_dataloader, optimizer, scheduler, device)
+        outputs = train(grad_accumulation_steps, config.train.micro_batch_size, train_step, model, batch, optimizer, scheduler, device)
         
         # Compute and log metrics
         train_metrics.update(outputs)

@@ -94,7 +94,7 @@ def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) 
                 'labels': self.labels[idx]
             }
 
-    dataset = MicroBatchDataset(batch['input_ids'], batch['attention_mask'], batch['labels'])
+    dataset = MicroBatchDataset(batch['input_ids'], batch['attention_mask'], batch["labels"])
     return DataLoader(dataset, batch_size=micro_batch_size, shuffle=False)
 
 def non_empty_text(examples: Dict[str, Any]) -> bool:
@@ -110,9 +110,10 @@ def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
     step = curr_metrics.get(f"{metrics.name}/step/current")
     loss = curr_metrics.get(f"{metrics.name}/loss/average")
+    norm = curr_metrics.get(f"{metrics.name}/norm/current")
     perplexity = curr_metrics.get(f"{metrics.name}/perplexity/average")
     throughput = curr_metrics.get(f"{metrics.name}/throughput/current")
-    return f"{prefix} Step: {step}, Avg. Loss: {loss:.4f}, Avg. Perplexity: {perplexity:.1f}, Throughput: {throughput:.1f}"
+    return f"{prefix} Step: {step} - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
 
 def get_eval_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
