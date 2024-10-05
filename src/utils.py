@@ -129,7 +129,23 @@ def get_num_steps(max_steps: int, max_epochs: int, num_examples: int, batch_size
     elif max_steps == -1: return max_steps_epoch
     else: return min(max_steps, max_steps_epoch)
 
-def format_int(num: int, prec: int = 1) -> str:
+def get_train_setup(steps: int, batch_size: int, seq_length: int, micro_batch_size: int, num_examples: int):
+    tokens_per_step = batch_size * seq_length
+    total_tokens = steps * tokens_per_step
+    avg_token_repetitions = total_tokens / (num_examples * seq_length)
+    grad_accumulation_steps = batch_size // micro_batch_size if micro_batch_size > 0 else 1
+
+    return {
+        "steps": steps,
+        "batch_size": batch_size,
+        "micro_batch_size": micro_batch_size,
+        "tokens_per_step": tokens_per_step,
+        "total_tokens": total_tokens,
+        "avg_token_repetitions": avg_token_repetitions,
+        "grad_accumulation_steps": grad_accumulation_steps,
+    }
+
+def format_int(num: int, prec: int = 2) -> str:
     if num < 1e3:
         return str(num)
     if num < 1e6:
@@ -138,3 +154,6 @@ def format_int(num: int, prec: int = 1) -> str:
         return f"{num/1e6:.{prec}f}M"
     else:
         return f"{num/1e9:.{prec}f}B"
+
+def format_float(num: float, prec: int = 2) -> str:
+    return f"{num:.{prec}f}"
