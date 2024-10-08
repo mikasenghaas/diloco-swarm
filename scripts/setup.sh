@@ -1,38 +1,46 @@
 #!/bin/bash
 
-# Load .env
-if [ -f .env ]; then
-  export $(grep -v '^#' .env | xargs)
+# Check that .env, .gitconfig and .sshconfig exist
+if [ ! -f .env ] || [ ! -f .gitconfig ] || [ ! -f .sshconfig ]; then
+    echo "Error: .env, .gitconfig or .sshconfig does not exist"
+    exit 1
 fi
 
-# Install miniconda
-set -e
-wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O install_miniconda.sh
-bash install_miniconda.sh -b -p $PWD/miniconda
-export PATH="$PWD/miniconda/bin:$PATH"
-conda init
-source ~/.bashrc
+# Check for required arguments
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 \"ssh <user>@<host> -p <port> -i <private_key>\""
+    exit 1
+fi
 
-# Create conda environment
-conda create -n swarm python~=3.10.15 -y
-conda activate swarm
+# Parse user, host and port from the input string
+SSH_STRING="$1"
+USER=$(echo "$SSH_STRING" | awk '{print $2}' | cut -d'@' -f1)
+HOST=$(echo "$SSH_STRING" | awk '{print $2}' | cut -d'@' -f2)
+PORT=$(echo "$SSH_STRING" | awk '{print $4}')
 
-# Install additional dependencies
-cd swarm
-pip install --user --upgrade pip
-pip install --user --no-cache-dir -r requirements.txt
+# Set up SSH and SCP commands
+SSH_FLAGS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET "
+SSH_CMD="ssh $SSH_FLAGS $USER@$HOST -p $PORT -i ~/.ssh/prime"
+SCP_CMD="scp $SSH_FLAGS -P $PORT -i ~/.ssh/prime"
 
-# Setup git
-echo "Setting up git"
-git config --global user.name "mikasenghaas"
-git config --global user.email "mikasenghaas@gmail.com"
-git config --global credential.helper store
-echo "https://mikasenghaas:${GIT_TOKEN}@github.com" > ~/.git-credentials
 
-# Setup keys
-echo "Setting up W&B API key"
-python -m wandb login $WANDB_TOKEN
+# Transfer files
+echo "Transferring files..."
+$SCP_CMD .env $USER@$HOST:~
+$SCP_CMD .gitconfig $USER@$HOST:~/.gitconfig
+$SCP_CMD .sshconfig $USER@$HOST:~/.ssh/config
+$SCP_CMD scripts/setup_remote.sh $USER@$HOST:~
+$SCP_CMD scripts/cleanup_remote.sh $USER@$HOST:~
+$SCP_CMD ~/.ssh/github-personal $USER@$HOST:~/.ssh/github-personal
 
-# Setup W&B
-echo "Setting up HF login"
-huggingface-cli login --token $HF_TOKEN --add-to-git-credential
+# Execute remote setup
+echo "Setting up remote server..."
+$SSH_CMD << EOF > /dev/null 2>&1
+    set -e
+    bash ~/setup_remote.sh
+EOF
+echo "Done!"
+
+# Connect to instance
+CMD="ssh $USER@$HOST -p $PORT"
+echo "Connect to Prime instance using \`$CMD\` (Copied to clipboard!)" && echo $CMD | pbcopy

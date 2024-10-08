@@ -1,0 +1,10 @@
+[user]
+  name = <name>
+  email = <email>
+  signingkey = <path/to/key>
+
+[commit]
+	gpgsign = true
+
+[gpg]
+	format = ssh
