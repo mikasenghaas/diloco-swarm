@@ -52,7 +52,7 @@ def get_scheduler(train: TrainConfig, optimizer: AdamW, num_steps: int) -> Lambd
             progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
             cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
             return min_lr_factor + (1 - min_lr_factor) * cosine_decay
-        return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_steps, train.scheduler.num_cycles), last_epoch=train.scheduler.last_epoch)
+        return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_steps, train.scheduler.num_cycles, train.scheduler.min_lr_factor), last_epoch=train.scheduler.last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
