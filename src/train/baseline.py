@@ -27,7 +27,7 @@ class BaselineConfig(BaseConfig):
     eval: EvalConfig = EvalConfig()
     logging: LoggingConfig = LoggingConfig()
 
-def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
+def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, max_norm: float,device: torch.device) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
@@ -36,6 +36,7 @@ def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, 
     batch_tokens, batch_examples = 0, 0
 
     autocast = get_autocast_context(device)
+    grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
         with autocast:
@@ -47,11 +48,12 @@ def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, 
         batch_examples += micro_batch["input_ids"].shape[0]
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+    lr = scheduler.get_last_lr()[0]
     optimizer.step()
     scheduler.step()
 
-    return Outputs(step=step, lr=scheduler.get_last_lr()[0], loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=time.time() - start)
+    return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=time.time() - start)
 
 def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Outputs:
     start = time.time()
@@ -136,7 +138,7 @@ def main(config: BaselineConfig):
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(grad_accumulation_steps, train_step, model, micro_batchloader, optimizer, scheduler, device)
+        outputs = train(train_step, model, micro_batchloader, optimizer, scheduler, config.train.max_norm, device)
         
         # Compute and log metrics
         train_metrics.update(outputs)

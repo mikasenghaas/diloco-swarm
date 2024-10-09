@@ -33,7 +33,7 @@ class TrainConfig(BaseConfig):
     batch_size: int = 32
     precision: str = "high"
     seed: int = 42
-    norm: float = 1.0
+    max_norm: float = 1.0
 
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
