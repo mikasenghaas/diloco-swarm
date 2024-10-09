@@ -1,5 +1,5 @@
 """
-Minimal implementation of pre-training a LLM for text generation.
+Single-GPU LLM pre-training.
 """
 import autorootcwd
 import time
@@ -13,12 +13,19 @@ from transformers import AutoModelForCausalLM
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_autocast_context
-from pydantic import validate_call
-from pydantic_config import parse_argv
-from src.config import Config
 from src.logger import Level
+from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_autocast_context
 from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
+from src.config import ModelConfig, TokenizerConfig, DataConfig, TrainConfig, EvalConfig, LoggingConfig
+from pydantic_config import BaseConfig, parse_argv
+
+class BaselineConfig(BaseConfig):
+    model: ModelConfig = ModelConfig()
+    tokenizer: TokenizerConfig = TokenizerConfig()
+    data: DataConfig = DataConfig()
+    train: TrainConfig = TrainConfig()
+    eval: EvalConfig = EvalConfig()
+    logging: LoggingConfig = LoggingConfig()
 
 def train(grad_accumulation_steps: int, step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device) -> Outputs:
     start = time.time()
@@ -57,8 +64,7 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
 
         return Outputs(step=step, loss=outputs.loss, num_tokens=num_tokens, num_examples=num_examples, time=time.time() - start)
 
-@validate_call
-def main(config: Config):
+def main(config: BaselineConfig):
     # Set precision and seed
     set_precision(config.train.precision)
     seed_everything(config.train.seed)
@@ -87,9 +93,10 @@ def main(config: Config):
     logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
-    train_data = train_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
-    val_data = val_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
-    test_data = test_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, config.data.seq_length))
+    seq_length = config.data.seq_length
+    train_data = train_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, seq_length))
+    val_data = val_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, seq_length))
+    test_data = test_data.filter(non_empty_text).filter(non_headline).map(lambda examples: tokenize(examples, tokenizer, seq_length))
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders
@@ -182,4 +189,4 @@ def main(config: Config):
 
 if __name__ == "__main__":
     disable_progress_bar()
-    main(Config(**parse_argv()))
+    main(BaselineConfig(**parse_argv()))

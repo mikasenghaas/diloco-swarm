@@ -1,6 +1,3 @@
-"""
-How to use Python dataclasses to define arguments for a program.
-"""
 from pydantic_config import BaseConfig, parse_argv
 
 class ModelConfig(BaseConfig):
@@ -57,7 +54,7 @@ class ConsoleLoggingConfig(BaseConfig):
     log_level: str = "INFO"
 
 class FileLoggingConfig(BaseConfig):
-    enable: bool = True
+    enable: bool = False
     log_level: str = "DEBUG"
     name: str = "output.log"
 
@@ -74,14 +71,6 @@ class LoggingConfig(BaseConfig):
     file: FileLoggingConfig = FileLoggingConfig()
     wandb: WandbLoggingConfig = WandbLoggingConfig()
     ckpt: CheckpointingConfig = CheckpointingConfig()
-
-class Config(BaseConfig):
-    model: ModelConfig = ModelConfig()
-    tokenizer: TokenizerConfig = TokenizerConfig()
-    data: DataConfig = DataConfig()
-    train: TrainConfig = TrainConfig()
-    eval: EvalConfig = EvalConfig()
-    logging: LoggingConfig = LoggingConfig()
 
 if __name__ == "__main__":
     import yaml
