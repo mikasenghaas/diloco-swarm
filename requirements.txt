@@ -4,5 +4,5 @@ torch
 sentencepiece
 autorootcwd
 wandb
-git+https://github.com/samsja/pydantic_config
+git+https://github.com/samsja/pydantic_config.git#egg=pydantic_config[toml]
 huggingface_hub[cli]
