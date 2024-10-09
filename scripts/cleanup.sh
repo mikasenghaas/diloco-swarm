@@ -2,7 +2,7 @@
 
 # Check for required arguments
 if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 \"ssh <user>@<host> -p <port> -i <private_key>\""
+    echo "Usage: $0 <SSH_STRING>"
     exit 1
 fi
 
@@ -24,3 +24,7 @@ $SSH_CMD << EOF > /dev/null 2>&1
 EOF
 
 echo "Done!"
+
+# Connect to instance
+CMD="ssh $USER@$HOST -p $PORT"
+echo "Connect to Prime instance using \`$CMD\` (Copied to clipboard!)" && echo $CMD | pbcopy

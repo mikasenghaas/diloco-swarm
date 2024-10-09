@@ -1,28 +1,32 @@
 #!/bin/bash
 
+# Check for required arguments
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <SSH_STRING> <PERSISTENT_DIR>"
+    exit 1
+fi
+
 # Check that .env, .gitconfig and .sshconfig exist
 if [ ! -f .env ] || [ ! -f .gitconfig ] || [ ! -f .sshconfig ]; then
     echo "Error: .env, .gitconfig or .sshconfig does not exist"
     exit 1
 fi
 
-# Check for required arguments
-if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 \"ssh <user>@<host> -p <port> -i <private_key>\""
-    exit 1
-fi
-
 # Parse user, host and port from the input string
 SSH_STRING="$1"
+PERSISTENT_DIR="$2"
 USER=$(echo "$SSH_STRING" | awk '{print $2}' | cut -d'@' -f1)
 HOST=$(echo "$SSH_STRING" | awk '{print $2}' | cut -d'@' -f2)
 PORT=$(echo "$SSH_STRING" | awk '{print $4}')
+
+# Add or update PERSISTENT_DIR in .env
+sed -i '' '/^PERSISTENT_DIR=/d' .env
+echo "PERSISTENT_DIR=$PERSISTENT_DIR" >> .env
 
 # Set up SSH and SCP commands
 SSH_FLAGS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET "
 SSH_CMD="ssh $SSH_FLAGS $USER@$HOST -p $PORT -i ~/.ssh/prime"
 SCP_CMD="scp $SSH_FLAGS -P $PORT -i ~/.ssh/prime"
-
 
 # Transfer files
 echo "Transferring files..."
