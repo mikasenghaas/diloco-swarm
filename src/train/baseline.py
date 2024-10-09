@@ -14,7 +14,7 @@ from datasets import disable_progress_bar
 from tqdm import tqdm
 
 from src.logger import Level
-from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_autocast_context
+from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float
 from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, TokenizerConfig, DataConfig, TrainConfig, EvalConfig, LoggingConfig
 from pydantic_config import BaseConfig, parse_argv
@@ -27,7 +27,7 @@ class BaselineConfig(BaseConfig):
     eval: EvalConfig
     logging: LoggingConfig
 
-def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, max_norm: float,device: torch.device) -> Outputs:
+def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, max_norm: float, device: torch.device) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
@@ -35,14 +35,14 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
     batch_loss = torch.Tensor([0.0]).to(device)
     batch_tokens, batch_examples = 0, 0
 
-    autocast = get_autocast_context(device)
     grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        with autocast:
-            outputs = model(micro_batch["input_ids"], attention_mask=micro_batch["attention_mask"], labels=micro_batch["labels"])
-        outputs.loss /= grad_accumulation_steps
-        outputs.loss.backward()
+        outputs = model(**micro_batch)
+        loss = outputs.loss / grad_accumulation_steps
+        
+        # Backward
+        loss.backward()
 
         batch_loss += outputs.loss.detach()
         batch_examples += micro_batch["input_ids"].shape[0]
@@ -60,9 +60,9 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
     model.eval()
     batch = {k: v.to(device) for k, v in batch.items()}
     with torch.no_grad():
-        outputs = model(batch["input_ids"], attention_mask=batch["attention_mask"], labels=batch["labels"])
-        num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
+        outputs = model(**batch)
         num_examples = batch["input_ids"].shape[0]
+        num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
 
         return Outputs(step=step, loss=outputs.loss, num_tokens=num_tokens, num_examples=num_examples, time=time.time() - start)
 

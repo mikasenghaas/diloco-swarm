@@ -148,20 +148,6 @@ def get_train_setup(steps: int, batch_size: int, seq_length: int, micro_batch_si
         "grad_accumulation_steps": grad_accumulation_steps,
     }
 
-def get_autocast_context(device: torch.device) -> torch.autocast:
-    class NoAutocast:
-        def __enter__(self):
-            pass
-
-        def __exit__(self, *args):
-            pass
-
-    return (
-        torch.autocast(device_type=device.type, dtype=torch.bfloat16)
-        if device.type != 'mps'
-        else NoAutocast()
-    )
-
 def format_int(num: int, prec: int = 2) -> str:
     if num < 1e3:
         return str(num)
