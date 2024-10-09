@@ -20,12 +20,12 @@ from src.config import ModelConfig, TokenizerConfig, DataConfig, TrainConfig, Ev
 from pydantic_config import BaseConfig, parse_argv
 
 class BaselineConfig(BaseConfig):
-    model: ModelConfig = ModelConfig()
-    tokenizer: TokenizerConfig = TokenizerConfig()
-    data: DataConfig = DataConfig()
-    train: TrainConfig = TrainConfig()
-    eval: EvalConfig = EvalConfig()
-    logging: LoggingConfig = LoggingConfig()
+    model: ModelConfig
+    tokenizer: TokenizerConfig
+    data: DataConfig
+    train: TrainConfig
+    eval: EvalConfig
+    logging: LoggingConfig
 
 def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, max_norm: float,device: torch.device) -> Outputs:
     start = time.time()

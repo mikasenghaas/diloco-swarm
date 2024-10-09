@@ -1,16 +1,16 @@
 from pydantic_config import BaseConfig, parse_argv
 
 class ModelConfig(BaseConfig):
-    name: str = "PrimeIntellect/llama-14m-fresh"
+    name: str
 
 class TokenizerConfig(BaseConfig):
-    name: str = "meta-llama/Llama-2-7b-hf"
+    name: str
     fast: bool = True
 
 class DataConfig(BaseConfig):
-    path: str = "Salesforce/wikitext"
-    name: str = "wikitext-2-raw-v1"
-    seq_length: int = 128
+    path: str
+    name: str
+    seq_length: int
     num_workers: int = 1
     subset_size: float = 1.0
 
@@ -20,46 +20,46 @@ class OptimizerConfig(BaseConfig):
     betas: list[float] = [0.9, 0.95]
     
 class SchedulerConfig(BaseConfig):
-    enable: bool = False
+    enable: bool
     warmup_steps: int = 100
     num_cycles: float = 0.5
     min_lr_factor: float = 0.1
     last_epoch: int = -1
 
 class TrainConfig(BaseConfig):
-    max_epochs: int = 1
-    max_steps: int = 10
+    max_steps: int
+    max_epochs: int = -1
     micro_batch_size: int = 32
     batch_size: int = 32
     precision: str = "high"
     seed: int = 42
     max_norm: float = 1.0
 
-    optimizer: OptimizerConfig = OptimizerConfig()
-    scheduler: SchedulerConfig = SchedulerConfig()
+    optimizer: OptimizerConfig
+    scheduler: SchedulerConfig
 
 class EvalConfig(BaseConfig):
-    enable: bool = False
+    enable: bool
     every_n_steps: int = -1
     max_epochs: int = 1
     max_steps: int = -1
     batch_size: int = 1
 
 class CheckpointingConfig(BaseConfig):
-    enable: bool = False
+    enable: bool
     every_n_steps: int = -1
 
 class ConsoleLoggingConfig(BaseConfig):
-    enable: bool = True
+    enable: bool
     log_level: str = "INFO"
 
 class FileLoggingConfig(BaseConfig):
-    enable: bool = False
+    enable: bool
     log_level: str = "DEBUG"
     name: str = "output.log"
 
 class WandbLoggingConfig(BaseConfig):
-    enable: bool = False
+    enable: bool
     entity: str | None = "mikasenghaas"
     project: str | None = "swarm"
     group: str | None = None
@@ -67,10 +67,10 @@ class WandbLoggingConfig(BaseConfig):
 
 class LoggingConfig(BaseConfig):
     log_dir: str = "logs"
-    console: ConsoleLoggingConfig = ConsoleLoggingConfig()
-    file: FileLoggingConfig = FileLoggingConfig()
-    wandb: WandbLoggingConfig = WandbLoggingConfig()
-    ckpt: CheckpointingConfig = CheckpointingConfig()
+    console: ConsoleLoggingConfig
+    file: FileLoggingConfig
+    wandb: WandbLoggingConfig
+    ckpt: CheckpointingConfig
 
 if __name__ == "__main__":
     import yaml
