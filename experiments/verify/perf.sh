@@ -12,8 +12,11 @@ set -e
 # Run 5: micro_batch_size=16 (Tokens/Micro Step: 16 * 1024 ~ 16K)
 # Run 6: micro_batch_size=32 (Tokens/Micro Step: 32 * 1024 ~ 32K)
 # Run 7: micro_batch_size=64 (Tokens/Micro Step: 64 * 1024 ~ 64K)
+# Run 8: micro_batch_size=128 (Tokens/Micro Step: 128 * 1024 ~ 128K)
+# Run 9: micro_batch_size=256 (Tokens/Micro Step: 256 * 1024 ~ 256K)
+# Run 10: micro_batch_size=512 (Tokens/Micro Step: 512 * 1024 ~ 512K)
 
-for MICRO_BATCH_SIZE in 1 2 4 8 16 32 64
+for MICRO_BATCH_SIZE in 1 2 4 8 16 32 64 128 256 512
 do
     python src/train/baseline.py @configs/baseline/perf.toml --train.micro_batch_size $MICRO_BATCH_SIZE
 done
