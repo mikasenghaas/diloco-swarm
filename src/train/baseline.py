@@ -44,7 +44,7 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
         # Backward
         loss.backward()
 
-        batch_loss += outputs.loss.detach()
+        batch_loss += loss.detach()
         batch_examples += micro_batch["input_ids"].shape[0]
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
