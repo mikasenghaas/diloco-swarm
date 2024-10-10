@@ -123,14 +123,12 @@ def main(config: BaselineConfig):
     # Compute grad accumulation steps
     grad_accumulation_steps = config.train.batch_size // config.train.micro_batch_size
     assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
-    logger.log_message(f"Gradient Accumulation Steps: {grad_accumulation_steps}")
 
     # Set up optimizer
     optimizer = get_optimizer(config.train, model)
     scheduler = get_scheduler(config.train, optimizer, num_train_steps)
 
     # Start Training
-    logger.log_message("Starting training")
     train_metrics = Metrics([Step(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
     train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
