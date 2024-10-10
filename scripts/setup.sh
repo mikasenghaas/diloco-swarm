@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check for required arguments
-if [ "$#" -ne 2 ]; then
-    echo "Usage: $0 <SSH_STRING> <PERSISTENT_DIR>"
+if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
+    echo "Usage: $0 <USER> <HOST> <PERSISTENT_DIR> [<PORT>]"
     exit 1
 fi
 
@@ -12,12 +12,14 @@ if [ ! -f .env ] || [ ! -f .gitconfig ] || [ ! -f .sshconfig ]; then
     exit 1
 fi
 
-# Parse user, host and port from the input string
-SSH_STRING="$1"
-PERSISTENT_DIR="$2"
-USER=$(echo "$SSH_STRING" | awk '{print $2}' | cut -d'@' -f1)
-HOST=$(echo "$SSH_STRING" | awk '{print $2}' | cut -d'@' -f2)
-PORT=$(echo "$SSH_STRING" | awk '{print $4}')
+USER=$1
+HOST=$2
+PERSISTENT_DIR=$3
+if [ "$#" -eq 4 ]; then
+    PORT=$4
+else
+    PORT=22
+fi
 
 # Add or update PERSISTENT_DIR in .env
 sed -i '' '/^PERSISTENT_DIR=/d' .env
