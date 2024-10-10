@@ -2,6 +2,8 @@
 
 set -e
 
+GROUP="verify/perf"
+
 # Using debug model: ~9M with performance config (config/baseline/perf.toml)
 # Tokens/ Step = batch_size * seq_length = 512 * 1024 = 524288 ~ 0.5M
 
@@ -18,5 +20,9 @@ set -e
 
 for MICRO_BATCH_SIZE in 1 2 4 8 16 32 64 128 256 512
 do
-    python src/train/baseline.py @configs/baseline/perf.toml --train.micro_batch_size $MICRO_BATCH_SIZE
+    python src/train/baseline.py @configs/benchmark.toml \
+        --model @configs/model/llama2.toml \
+        --data @configs/data/wikitext.toml \
+        --train.micro_batch_size $MICRO_BATCH_SIZE \
+        --logging.wandb.group $GROUP
 done

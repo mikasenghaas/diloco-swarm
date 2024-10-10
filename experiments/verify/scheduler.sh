@@ -8,25 +8,33 @@ GROUP="verify/scheduler"
 # Run 2: scheduler.enable=true, scheduler.warmup_steps=50
 # Run 4: scheduler.enable=true, scheduler.warmup_steps=50, scheduler.min_lr_factor=0.5
 
-python src/train/baseline.py @configs/baseline/debug.toml \
+python src/train/baseline.py @configs/debug.toml \
+    --model @configs/model/llama2.toml \
+    --data @configs/data/wikitext.toml \
     --logging.file.enable true \
     --logging.wandb.enable true \
     --logging.wandb.group $GROUP \
 
-python src/train/baseline.py @configs/baseline/debug.toml \
+python src/train/baseline.py @configs/debug.toml \
+    --model @configs/model/llama2.toml \
+    --data @configs/data/wikitext.toml \
     --logging.file.enable true \
     --logging.wandb.enable true \
     --logging.wandb.group $GROUP \
-    --train.scheduler.enable true \
+    --train.scheduler.enable true
 
-python src/train/baseline.py @configs/baseline/debug.toml \
+python src/train/baseline.py @configs/debug.toml \
+    --model @configs/model/llama2.toml \
+    --data @configs/data/wikitext.toml \
     --logging.file.enable true \
     --logging.wandb.enable true \
     --logging.wandb.group $GROUP \
     --train.scheduler.enable true \
     --train.scheduler.warmup_steps 50
 
-python src/train/baseline.py @configs/baseline/debug.toml \
+python src/train/baseline.py @configs/debug.toml \
+    --model @configs/model/llama2.toml \
+    --data @configs/data/wikitext.toml \
     --logging.file.enable true \
     --logging.wandb.enable true \
     --logging.wandb.group $GROUP \

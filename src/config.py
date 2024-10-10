@@ -3,10 +3,6 @@ from pydantic_config import BaseConfig, parse_argv
 class ModelConfig(BaseConfig):
     name: str
 
-class TokenizerConfig(BaseConfig):
-    name: str
-    fast: bool = True
-
 class DataConfig(BaseConfig):
     path: str
     name: str
@@ -28,9 +24,9 @@ class SchedulerConfig(BaseConfig):
 
 class TrainConfig(BaseConfig):
     max_steps: int
-    max_epochs: int = -1
-    micro_batch_size: int = 32
-    batch_size: int = 32
+    max_epochs: int
+    micro_batch_size: int
+    batch_size: int 
     precision: str = "high"
     seed: int = 42
     max_norm: float = 1.0
@@ -76,7 +72,6 @@ if __name__ == "__main__":
 
     class TestConfig(BaseConfig):
         model: ModelConfig = ModelConfig()
-        tokenizer: TokenizerConfig = TokenizerConfig()
         data: DataConfig = DataConfig()
         train: TrainConfig = TrainConfig()
         eval: EvalConfig = EvalConfig()

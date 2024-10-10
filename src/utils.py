@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
-from .config import ModelConfig, TokenizerConfig, DataConfig, LoggingConfig, TrainConfig
+from .config import ModelConfig, DataConfig, LoggingConfig, TrainConfig
 from .logger import CustomLogger
 from .metrics import Metrics
 
@@ -38,8 +38,8 @@ def get_logger(logging: LoggingConfig) -> CustomLogger:
 def get_model(model: ModelConfig) -> AutoModelForCausalLM:
     return AutoModelForCausalLM.from_pretrained(model.name)
 
-def get_tokenizer(tokenizer: TokenizerConfig) -> AutoTokenizer:
-    return AutoTokenizer.from_pretrained(tokenizer.name, fast=tokenizer.fast)
+def get_tokenizer(model: ModelConfig) -> AutoTokenizer:
+    return AutoTokenizer.from_pretrained(model.name, fast=True)
 
 def get_optimizer(train: TrainConfig, model: AutoModelForCausalLM) -> AdamW:
     return AdamW(model.parameters(), lr=train.optimizer.lr, weight_decay=train.optimizer.decay, betas=train.optimizer.betas)

@@ -16,12 +16,11 @@ from tqdm import tqdm
 from src.logger import Level
 from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, non_empty_text, non_headline, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float
 from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
-from src.config import ModelConfig, TokenizerConfig, DataConfig, TrainConfig, EvalConfig, LoggingConfig
+from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, LoggingConfig
 from pydantic_config import BaseConfig, parse_argv
 
 class BaselineConfig(BaseConfig):
     model: ModelConfig
-    tokenizer: TokenizerConfig
     data: DataConfig
     train: TrainConfig
     eval: EvalConfig
@@ -84,9 +83,9 @@ def main(config: BaselineConfig):
     logger.log_message(f"Loaded model '{config.model.name}' ({format_int(model.num_parameters(), 2)} parameters)")
 
     # Load tokenizer
-    tokenizer = get_tokenizer(config.tokenizer)
+    tokenizer = get_tokenizer(config.model)
     tokenizer.pad_token = tokenizer.eos_token
-    logger.log_message(f"Loaded tokenizer '{config.tokenizer.name}' ({format_int(len(tokenizer), 0)} tokens)")
+    logger.log_message(f"Loaded tokenizer '{config.model.name}' ({format_int(len(tokenizer), 0)} tokens)")
 
     # Load and split dataset
     train_data = get_dataset(config.data, split="train")

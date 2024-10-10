@@ -13,7 +13,9 @@ GROUP="verify/grad-acc"
 
 for MICRO_BATCH_SIZE in 1 2 4 8 16 32 64
 do
-    python src/train/baseline.py @configs/baseline/debug.toml \
+    python src/train/baseline.py @configs/debug.toml \
+        --model @configs/model/llama2.toml \
+        --data @configs/data/wikitext.toml \
         --logging.file.enable true \
         --logging.wandb.enable true \
         --logging.wandb.group $GROUP \

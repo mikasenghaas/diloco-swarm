@@ -1,18 +1,11 @@
-[model]
-name = "PrimeIntellect/llama-14m-fresh"
-
-[tokenizer]
-name = "meta-llama/Llama-2-7b-hf"
-
 [data]
-path = "Salesforce/wikitext"
-name = "wikitext-2-raw-v1"
 seq_length = 1024
 
 [train]
 max_steps = -1
 max_epochs = 1
 batch_size = 512
+micro_batch_size = 1
 
 [train.optimizer]
 
@@ -28,7 +21,6 @@ enable = true
 
 [logging.wandb]
 enable = true
-group = "verify/perf"
 
 [logging.file]
 enable = true
