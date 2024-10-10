@@ -103,18 +103,18 @@ def main(config: BaselineConfig):
     
     # Prepare data loaders
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=True, cycle=True)
-    val_dataloader = get_dataloader(val_data, batch_size=config.eval.batch_size, shuffle=True, cycle=True)
-    test_dataloader = get_dataloader(test_data, batch_size=config.eval.batch_size, shuffle=False, cycle=True)
+    val_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=True, cycle=True)
+    test_dataloader = get_dataloader(test_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=True)
     
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
-    num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.eval.batch_size)
-    num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
+    num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.train.micro_batch_size)
+    num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.train.micro_batch_size)
 
     # Get training, evaluation and testing setup
     train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
-    eval_setup = get_train_setup(num_eval_steps, config.eval.batch_size, config.data.seq_length, -1, len(val_data))
-    test_setup = get_train_setup(num_test_steps, config.eval.batch_size, config.data.seq_length, -1, len(test_data))
+    eval_setup = get_train_setup(num_eval_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
+    test_setup = get_train_setup(num_test_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(test_data))
 
     logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]))
     logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
@@ -169,7 +169,7 @@ def main(config: BaselineConfig):
     # Test
     if config.eval.enable:
         test_metrics = Metrics([Loss(), Perplexity()], name="test")
-        num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.eval.batch_size)
+        num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.train.micro_batch_size)
         test_bar = tqdm(range(1, num_test_steps+1), position=0, leave=True)
         for test_step in test_bar:
             batch = next(test_dataloader)

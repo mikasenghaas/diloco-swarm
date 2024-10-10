@@ -43,7 +43,6 @@ class EvalConfig(BaseConfig):
     every_n_steps: int = -1
     max_epochs: int = 1
     max_steps: int = -1
-    batch_size: int = 1
 
 class CheckpointingConfig(BaseConfig):
     enable: bool

@@ -1,14 +1,8 @@
 #!/bin/bash
 
 set -e
-GROUP="verify/perf"
 
-# Using debug model: ~9M
-
-# For all runs, we use:
-#   batch_size=512
-#   seq_length=1024
-
+# Using debug model: ~9M with performance config (config/baseline/perf.toml)
 # Tokens/ Step = batch_size * seq_length = 512 * 1024 = 524288 ~ 0.5M
 
 # Run 1: micro_batch_size=1 (Tokens/Micro Step: 1 * 1024 ~ 1K)
@@ -17,14 +11,9 @@ GROUP="verify/perf"
 # Run 4: micro_batch_size=8 (Tokens/Micro Step: 8 * 1024 ~ 8K)
 # Run 5: micro_batch_size=16 (Tokens/Micro Step: 16 * 1024 ~ 16K)
 # Run 6: micro_batch_size=32 (Tokens/Micro Step: 32 * 1024 ~ 32K)
+# Run 7: micro_batch_size=64 (Tokens/Micro Step: 64 * 1024 ~ 64K)
 
-for MICRO_BATCH_SIZE in 1 2 4 8 16 32
+for MICRO_BATCH_SIZE in 1 2 4 8 16 32 64
 do
-    python src/train/baseline.py @configs/baseline/debug.toml \
-        --logging.file.enable true \
-        --logging.wandb.enable true \
-        --logging.wandb.group $GROUP \
-        --train.micro_batch_size $MICRO_BATCH_SIZE \
-        --train.batch_size 512 \
-        --data.seq_length 1024
+    python src/train/baseline.py @configs/baseline/perf.toml --train.micro_batch_size $MICRO_BATCH_SIZE
 done
