@@ -112,9 +112,9 @@ def tokenize(examples: Dict[str, Any], tokenizer: AutoTokenizer, max_length: int
 def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
     step = curr_metrics.get(f"{metrics.name}/step/current")
-    loss = curr_metrics.get(f"{metrics.name}/loss/average")
+    loss = curr_metrics.get(f"{metrics.name}/loss/current")
     norm = curr_metrics.get(f"{metrics.name}/norm/current")
-    perplexity = curr_metrics.get(f"{metrics.name}/perplexity/average")
+    perplexity = curr_metrics.get(f"{metrics.name}/perplexity/current")
     throughput = curr_metrics.get(f"{metrics.name}/throughput/current")
     return f"{prefix} Step: {step} - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
 
