@@ -93,7 +93,7 @@ class CustomLogger:
 
         if self.wandb_run:
             artifact = wandb.Artifact(name=str(step), type="model")
-            artifact.add_file(checkpoint_dir)
+            artifact.add_dir(checkpoint_dir)
             wandb.log_artifact(artifact)
 
     def close(self) -> None:
