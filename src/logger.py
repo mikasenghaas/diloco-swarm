@@ -92,7 +92,7 @@ class CustomLogger:
         tokenizer.save_pretrained(checkpoint_dir)
 
         if self.wandb_run:
-            artifact = wandb.Artifact(name=step, type="model")
+            artifact = wandb.Artifact(name=str(step), type="model")
             artifact.add_file(checkpoint_dir)
             wandb.log_artifact(artifact)
 

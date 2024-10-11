@@ -32,4 +32,4 @@ enable = true
 
 [logging.ckpt]
 enable = true
-every_n_steps = 100
+every_n_steps = 50
