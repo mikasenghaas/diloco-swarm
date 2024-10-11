@@ -1,6 +1,8 @@
+import os
 import math
 import torch
 import numpy as np
+from dotenv import load_dotenv
 from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset, load_from_disk
@@ -24,6 +26,15 @@ def seed_everything(seed: int):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
 
+def get_persistent_dir() -> str | None:
+    # Load env variable from ~/.env file
+    load_dotenv(os.path.expanduser("~/.env"))
+    persistent_dir = os.getenv("PERSISTENT_DIR")
+    
+    return persistent_dir
+
+HF_CACHE_DIR = os.path.join(get_persistent_dir(), "huggingface")
+
 def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -36,10 +47,10 @@ def get_logger(logging: LoggingConfig) -> CustomLogger:
     return CustomLogger(logging)
 
 def get_model(model: ModelConfig) -> AutoModelForCausalLM:
-    return AutoModelForCausalLM.from_pretrained(model.name)
+    return AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
 
 def get_tokenizer(model: ModelConfig) -> AutoTokenizer:
-    return AutoTokenizer.from_pretrained(model.name, fast=True)
+    return AutoTokenizer.from_pretrained(model.name, fast=True, cache_dir=HF_CACHE_DIR)
 
 def get_optimizer(train: TrainConfig, model: AutoModelForCausalLM) -> AdamW:
     return AdamW(model.parameters(), lr=train.optimizer.lr, weight_decay=train.optimizer.decay, betas=train.optimizer.betas)
@@ -56,13 +67,7 @@ def get_scheduler(train: TrainConfig, optimizer: AdamW, num_steps: int) -> Lambd
     return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
-    local_path = f"data/{data.path}/{data.name}" if data.name is not None else f"data/{data.path}"
-    try:
-        datadict = load_from_disk(local_path)
-    except FileNotFoundError:
-        datadict = load_dataset(data.path, data.name, trust_remote_code=True)
-        datadict.save_to_disk(local_path)
-
+    datadict = load_dataset(data.path, data.name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
     dataset = datadict[split]
     
     if split == "train" and data.subset_size < 1.0:
@@ -99,12 +104,6 @@ def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) 
 
     dataset = MicroBatchDataset(batch['input_ids'], batch['attention_mask'], batch["labels"])
     return DataLoader(dataset, batch_size=micro_batch_size, shuffle=False)
-
-def non_empty_text(examples: Dict[str, Any]) -> bool:
-    return examples["text"] != ""
-
-def non_headline(examples: Dict[str, Any]) -> bool:
-    return not examples["text"].startswith(" = ")
 
 def tokenize(examples: Dict[str, Any], tokenizer: AutoTokenizer, max_length: int) -> Dict[str, Any]:
     return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=max_length+1)

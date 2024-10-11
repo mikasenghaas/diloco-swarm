@@ -21,7 +21,7 @@ GROUP="verify/perf"
 for MICRO_BATCH_SIZE in 1 2 4 8 16 32 64 128 256 512
 do
     python src/train/baseline.py @configs/benchmark.toml \
-        --model @configs/model/llama2.toml \
+        --model @configs/model/llama2-9m.toml \
         --data @configs/data/wikitext.toml \
         --train.micro_batch_size $MICRO_BATCH_SIZE \
         --logging.wandb.group $GROUP

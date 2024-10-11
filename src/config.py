@@ -5,7 +5,7 @@ class ModelConfig(BaseConfig):
 
 class DataConfig(BaseConfig):
     path: str
-    name: str
+    name: str | None = None
     seq_length: int
     num_workers: int = 1
     subset_size: float = 1.0
@@ -59,6 +59,7 @@ class WandbLoggingConfig(BaseConfig):
     project: str | None = "swarm"
     group: str | None = None
     run_name: str | None = None
+    cache_dir: str | None = None
 
 class LoggingConfig(BaseConfig):
     log_dir: str = "logs"
