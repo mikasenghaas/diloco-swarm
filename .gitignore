@@ -1,8 +1,8 @@
 # Custom
 .DS_Store
-logs
-tools
-data
+/logs
+/tools
+/data
 .gitconfig
 .sshconfig
 
