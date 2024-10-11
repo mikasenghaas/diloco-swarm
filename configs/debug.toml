@@ -4,6 +4,8 @@ max_epochs = -1
 micro_batch_size = 1
 batch_size = 32
 
+[train.amp]
+
 [train.optimizer]
 
 [train.scheduler]
