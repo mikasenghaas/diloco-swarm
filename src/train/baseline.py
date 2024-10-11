@@ -16,8 +16,8 @@ from datasets import disable_progress_bar
 from tqdm import tqdm
 
 from src.logger import Level
-from src.utils import set_precision, seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float
-from src.metrics import Outputs, Step, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
+from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, LoggingConfig
 from pydantic_config import BaseConfig, parse_argv
 
@@ -28,7 +28,7 @@ class BaselineConfig(BaseConfig):
     eval: EvalConfig
     logging: LoggingConfig
 
-def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, max_norm: float, device: torch.device) -> Outputs:
+def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, max_norm: float, dtype: torch.dtype) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
@@ -39,7 +39,10 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
     grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        outputs = model(**micro_batch)
+        with torch.amp.autocast(device_type=device.type, dtype=dtype):
+            outputs = model(**micro_batch)
+
+        # Scale loss
         loss = outputs.loss / grad_accumulation_steps
         
         # Backward
@@ -54,7 +57,12 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
     optimizer.step()
     scheduler.step()
 
-    return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=time.time() - start)
+    torch.cuda.synchronize()
+    end = time.time()
+    step_time = end - start
+    micro_step_time = step_time / grad_accumulation_steps
+
+    return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
 def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Outputs:
     start = time.time()
@@ -69,12 +77,15 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
 
 def main(config: BaselineConfig):
     # Set precision and seed
-    set_precision(config.train.precision)
     seed_everything(config.train.seed)
 
     # Get logger
     logger = get_logger(config.logging)
-    logger.log_config(config)
+    # logger.log_config(config)
+
+    # Set precision
+    torch.set_float32_matmul_precision(config.train.amp.precision)
+    logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}")
 
     # Get device
     device = get_device()
@@ -130,14 +141,14 @@ def main(config: BaselineConfig):
     scheduler = get_scheduler(config.train, optimizer, num_train_steps)
 
     # Start Training
-    train_metrics = Metrics([Step(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
+    train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
     train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, model, micro_batchloader, optimizer, scheduler, config.train.max_norm, device)
+        outputs = train(train_step, model, micro_batchloader, optimizer, scheduler, device, config.train.max_norm, get_dtype(config.train.amp.dtype))
         
         # Compute and log metrics
         train_metrics.update(outputs)

@@ -16,9 +16,6 @@ from .metrics import Metrics
 
 from typing import List, Dict, Any
     
-def set_precision(precision: str):
-    torch.set_float32_matmul_precision(precision)
-
 def seed_everything(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -38,10 +35,11 @@ HF_CACHE_DIR = os.path.join(get_persistent_dir(), "huggingface")
 def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
     else:
-        return torch.device("cpu")
+        raise RuntimeError("No CUDA device available.")
+
+def get_dtype(dtype: str) -> torch.dtype:
+    return getattr(torch, dtype)
 
 def get_logger(logging: LoggingConfig) -> CustomLogger:
     return CustomLogger(logging)
@@ -111,11 +109,12 @@ def tokenize(examples: Dict[str, Any], tokenizer: AutoTokenizer, max_length: int
 def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
     step = curr_metrics.get(f"{metrics.name}/step/current")
+    micro_time = curr_metrics.get(f"{metrics.name}/micro_time/current")
     loss = curr_metrics.get(f"{metrics.name}/loss/current")
     norm = curr_metrics.get(f"{metrics.name}/norm/current")
     perplexity = curr_metrics.get(f"{metrics.name}/perplexity/current")
     throughput = curr_metrics.get(f"{metrics.name}/throughput/current")
-    return f"{prefix} Step: {step} - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
+    return f"{prefix} Step: {step} - Time: {micro_time*1000:.1f}ms - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
 
 def get_eval_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()

@@ -9,8 +9,9 @@ class Outputs(BaseModel):
     loss: torch.Tensor
     num_tokens: int
     num_examples: int
-    norm: float | None = None
     lr: float | None = None
+    norm: float | None = None
+    micro_step_time: float | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -40,6 +41,36 @@ class Step(Metric):
 
     def reset(self):
         self.step = 0
+
+class Time(Metric):
+    """Time per step"""
+    __name__ = "time"
+    def __init__(self):
+        self.times : List[float] = []
+
+    def update(self, outputs: Outputs):
+        self.times.append(outputs.time)
+
+    def compute(self) -> Dict[str, float]:
+        return {"current": self.times[-1]}
+
+    def reset(self):
+        self.times = []
+
+class MicroTime(Metric):
+    """Avg. time per micro step"""
+    __name__ = "micro_time"
+    def __init__(self):
+        self.times : List[float] = []
+
+    def update(self, outputs: Outputs):
+        self.times.append(outputs.micro_step_time)
+
+    def compute(self) -> Dict[str, float]:
+        return {"current": self.times[-1]}
+
+    def reset(self):
+        self.times = []
 
 class Examples(Metric):
     __name__ = "examples"

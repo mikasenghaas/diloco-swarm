@@ -1,3 +1,4 @@
+from typing import Literal
 from pydantic_config import BaseConfig, parse_argv
 
 class ModelConfig(BaseConfig):
@@ -22,15 +23,19 @@ class SchedulerConfig(BaseConfig):
     min_lr_factor: float = 0.1
     last_epoch: int = -1
 
+class AmpConfig(BaseConfig):
+    precision: Literal["highest", "high", "medium"] = "high"
+    dtype: Literal["float32", "float16", "bfloat16"] = "bfloat16"
+
 class TrainConfig(BaseConfig):
     max_steps: int
     max_epochs: int
     micro_batch_size: int
     batch_size: int 
-    precision: str = "high"
     seed: int = 42
     max_norm: float = 1.0
 
+    amp: AmpConfig
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
 
