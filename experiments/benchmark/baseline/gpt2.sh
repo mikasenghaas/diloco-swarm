@@ -14,15 +14,15 @@ GROUP="benchmark/baseline/gpt2"
 # train.amp.dtype: [float16, bfloat16]
 # train.micro_batch_size: [1, 2, 4, 8, 16]
 
-PRECISION="highest high"
-DTYPE="float32 bfloat16"
-MICRO_BATCH_SIZE="1 2 4 8 16"
+PRECISIONS=("highest" "high")
+DTYPES=("float32" "bfloat16")
+MICRO_BATCH_SIZES=(1 2 4 8 16)
 
-for PRECISION in $PRECISION
+for PRECISION in "${PRECISIONS[@]}"
 do
-    for DTYPE in $DTYPE
+    for DTYPE in "${DTYPES[@]}"
     do
-        for MICRO_BATCH_SIZE in $MICRO_BATCH_SIZE
+        for MICRO_BATCH_SIZE in "${MICRO_BATCH_SIZES[@]}"
         do
             python src/train/baseline.py @configs/benchmark.toml \
                 --model @configs/model/gpt2-124m.toml \
