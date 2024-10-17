@@ -33,7 +33,7 @@ huggingface-cli login --token $HF_TOKEN --add-to-git-credential
 cp ~/.env $PERSISTENT_DIR
 
 # Install tmux and vim
-apt get update
-apt get install -y tmux vim
+apt-get update
+apt-get install -y tmux vim
 
 echo "Done!"
