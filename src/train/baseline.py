@@ -5,20 +5,20 @@ import autorootcwd
 
 import os
 import time
-from typing import Dict
+from typing import Dict, List
 
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
 from src.logger import Level
 from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
 from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
-from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, LoggingConfig
+from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from pydantic_config import BaseConfig, parse_argv
 
 class BaselineConfig(BaseConfig):
@@ -26,9 +26,10 @@ class BaselineConfig(BaseConfig):
     data: DataConfig
     train: TrainConfig
     eval: EvalConfig
+    sample: SampleConfig
     logging: LoggingConfig
 
-def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, max_norm: float, dtype: torch.dtype) -> Outputs:
+def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, config: BaselineConfig) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
@@ -39,7 +40,7 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
     grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        with torch.amp.autocast(device_type=device.type, dtype=dtype):
+        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
             outputs = model(**micro_batch)
 
         # Scale loss
@@ -52,7 +53,7 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
         batch_examples += micro_batch["input_ids"].shape[0]
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.train.max_norm)
     lr = scheduler.get_last_lr()[0]
     optimizer.step()
     scheduler.step()
@@ -75,13 +76,22 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
 
         return Outputs(step=step, loss=outputs.loss, num_tokens=num_tokens, num_examples=num_examples, time=time.time() - start)
 
+def sample(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: torch.device, config: BaselineConfig) -> List[str]:
+    model.eval()
+    model.to(device)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    inputs = tokenizer(config.sample.prompt, return_tensors="pt").to(device)
+    with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
+        outputs = model.generate(**inputs, do_sample=True, max_new_tokens=config.sample.max_new_tokens, top_k=config.sample.top_k, top_p=config.sample.top_p, num_return_sequences=config.sample.num_return_sequences, temperature=config.sample.temperature)
+    return tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
 def main(config: BaselineConfig):
     # Set precision and seed
     seed_everything(config.train.seed)
 
     # Get logger
     logger = get_logger(config.logging)
-    # logger.log_config(config)
+    logger.log_config(config)
 
     # Set precision
     torch.set_float32_matmul_precision(config.train.amp.precision)
@@ -132,6 +142,7 @@ def main(config: BaselineConfig):
     logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
     logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]))
 
+
     # Compute grad accumulation steps
     grad_accumulation_steps = config.train.batch_size // config.train.micro_batch_size
     assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
@@ -148,7 +159,7 @@ def main(config: BaselineConfig):
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, model, micro_batchloader, optimizer, scheduler, device, config.train.max_norm, get_dtype(config.train.amp.dtype))
+        outputs = train(train_step, model, micro_batchloader, optimizer, scheduler, device, config)
         
         # Compute and log metrics
         train_metrics.update(outputs)
@@ -171,6 +182,11 @@ def main(config: BaselineConfig):
 
             curr_metrics = eval_metrics.compute()
             logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
+
+        # Sample
+        if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
+            samples = sample(model, tokenizer, device, config)
+            logger.log_samples(samples, train_step)
 
         # Checkpoint
         if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:

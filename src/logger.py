@@ -1,7 +1,7 @@
 import os
 import yaml
 import logging
-from typing import Dict
+from typing import Dict, List
 from enum import Enum
 from datetime import datetime
 
@@ -33,8 +33,10 @@ class CustomLogger:
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_dir = os.path.join(self.config.log_dir, self.run_id)
         self.checkpoint_dir = os.path.join(self.log_dir, "checkpoints")
+        self.samples_dir = os.path.join(self.log_dir, "samples")
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        os.makedirs(self.samples_dir, exist_ok=True)
 
         # Set up wandb logging
         if self.config.wandb.enable:
@@ -94,6 +96,20 @@ class CustomLogger:
         if self.wandb_run:
             artifact = wandb.Artifact(name=str(step), type="model")
             artifact.add_dir(checkpoint_dir)
+            wandb.log_artifact(artifact)
+
+    def log_samples(self, samples: List[str], step: int, level: Level = Level.INFO) -> None:
+        for i, sample in enumerate(samples):
+            self.log_message(f"Sample {i+1}: {sample}", level=level)
+
+        sample_path = os.path.join(self.samples_dir, f"{step}.txt")
+        with open(sample_path, "w") as f:
+            for sample in samples:
+                f.write(sample + "\n")
+
+        if self.wandb_run:
+            artifact = wandb.Artifact(name=str(step), type="samples")
+            artifact.add_file(sample_path)
             wandb.log_artifact(artifact)
 
     def close(self) -> None:
