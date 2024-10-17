@@ -2,18 +2,22 @@
 seq_length = 1024
 
 [train]
-max_steps = -1
-max_epochs = 1
+max_steps = 5
+max_epochs = -1
 batch_size = 512
-micro_batch_size = 1
+
+[train.amp]
 
 [train.optimizer]
 
 [train.scheduler]
 enable = false
 
+[sample]
+enable = false
+
 [eval]
-enable = true
+enable = false
 every_n_steps = -1
 
 [logging.console]

@@ -16,6 +16,10 @@ betas = [0.9, 0.95]
 [train.scheduler]
 enable = true
 
+[sample]
+enable = true
+every_n_steps = 10
+
 [eval]
 enable = true
 max_steps = 10
