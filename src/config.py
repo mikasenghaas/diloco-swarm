@@ -51,7 +51,7 @@ class SampleConfig(BaseConfig):
     prompt: str = "Hey, who are you?"
     num_return_sequences: int = 10
     top_k: int = 50
-    top_p : float = 0.95
+    # top_p : float = 0.95
     max_new_tokens: int = 50
     temperature: float = 0.7
 

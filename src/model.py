@@ -10,8 +10,23 @@ class ModelType(Enum):
     LLAMA = "llama"
     GPT = "gpt"
 
+class Model(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, **kwargs):
+        outputs = self.model(**kwargs)
+        return outputs.logits
+
+    def __call__(self, **kwargs):
+        return self.forward(**kwargs)
+    
+    def num_parameters(self):
+        return sum(p.numel() for p in self.parameters())
+    
 class ShardedModel(nn.Module, ABC):
-    def __init__(self, model: AutoModelForCausalLM, world: World):
+    def __init__(self, model: Model, world: World):
         super().__init__()
         self.world = world
         self._setup_model_components(model)
@@ -26,8 +41,8 @@ class ShardedModel(nn.Module, ABC):
         start_layer = sum(layers_per_gpu[:self.world.local_rank])
         return list(range(start_layer, start_layer + layers_per_gpu[self.world.local_rank]))
 
-    def forward(self, input_ids, hidden_states=None, **kwargs):
-        x = hidden_states if hidden_states is not None else input_ids
+    def forward(self, **kwargs):
+        x = kwargs.get("hidden_states", kwargs.get("input_ids"))
         x = self.embed_tokens(x)
         for layer in self.decoder_layers.values():
             x = layer(x)[0]
@@ -45,14 +60,14 @@ class ShardedModel(nn.Module, ABC):
         return sum(p.numel() for p in self.parameters())
 
 class ShardedLlamaModel(ShardedModel):
-    def _setup_model_components(self, model: AutoModelForCausalLM):
+    def _setup_model_components(self, model: Model):
         self.embed_tokens = model.model.embed_tokens if self.world.is_first_stage else nn.Identity()
         self.decoder_layers = nn.ModuleDict({str(i): model.model.layers[i] for i in self.distribute_layers(model.config.num_hidden_layers)})
         self.norm = model.model.norm if self.world.is_last_stage else nn.Identity()
         self.lm_head = model.lm_head if self.world.is_last_stage else nn.Identity()
 
 class ShardedGPTModel(ShardedModel):
-    def _setup_model_components(self, model: AutoModelForCausalLM):
+    def _setup_model_components(self, model: Model):
         self.embed_tokens = model.transformer.wte if self.world.is_first_stage else nn.Identity()
         self.decoder_layers = nn.ModuleDict({str(i): model.transformer.h[i] for i in self.distribute_layers(model.config.num_hidden_layers)})
         self.norm = model.transformer.ln_f if self.world.is_last_stage else nn.Identity()
