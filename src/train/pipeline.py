@@ -27,6 +27,7 @@ from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleC
 from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_model_type, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, format_int, get_train_pbar_description
 from src.world import World
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Examples, Tokens, Loss, Perplexity, Throughput
+from src.comm import Comm
 from pydantic_config import BaseConfig, parse_argv
 
 # Global logger
@@ -40,37 +41,7 @@ class PipelineConfig(BaseConfig):
     sample: SampleConfig
     logging: LoggingConfig
 
-def communicate(world, step, operation, tensor=None, shapes=None, dtype=None, tag=0):
-    if operation == 'recv_forward':
-        if world.is_first_stage: return None
-        tensor = torch.empty(shapes, requires_grad=True, device='cuda', dtype=dtype)
-        src = world.prev_rank()
-    elif operation == 'send_forward':
-        if world.is_last_stage: return
-        dest = world.next_rank()
-    elif operation == 'recv_backward':
-        if world.is_last_stage: return None
-        tensor = torch.empty(shapes, requires_grad=True, device='cuda', dtype=dtype)
-        src = world.next_rank()
-    elif operation == 'send_backward':
-        if world.is_first_stage: return
-        dest = world.prev_rank()
-
-    is_send = operation.startswith('send')
-    peer_rank = dest if is_send else src
-
-    # Send or receive tensor with tag to ensure ordering
-    op = dist.P2POp(dist.isend if is_send else dist.irecv, tensor, peer_rank, tag=tag)
-
-    # Wait for send and receive operation to complete
-    [req.wait() for req in dist.batch_isend_irecv([op])]
-
-    # Synchronize
-    torch.cuda.synchronize()
-
-    return tensor if not is_send else None
-
-def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, world: World, config: PipelineConfig) -> Outputs:
+def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, world: World, comm: Comm) -> Outputs:
     global logger
     start = time.time()
     sharded_model.train()
@@ -85,14 +56,11 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
     input_tensors, output_tensors = [], []
     grad_accumulation_steps = len(batch_loader)
     for micro_batch_id, micro_batch in enumerate(batch_loader): # All forward passes
-        tensor_shapes = (micro_batch["input_ids"].shape[0], micro_batch["input_ids"].shape[1], 768)
-        input_tensor = communicate(world, step, operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32, tag=micro_batch_id)
-        # logger.log_message(f"Received forward input_tensor {step} | {input_tensor.shape if input_tensor is not None else 'None'}", level=Level.DEBUG)
+        input_tensor = comm.recv_forward(micro_batch_id)
         micro_batch["hidden_states"] = input_tensor
         micro_batch = {k: v.to(device) if v is not None else v for k, v in micro_batch.items()}
         output_tensor = sharded_model.forward(micro_batch)
-        communicate(world, step, operation='send_forward', tensor=output_tensor, tag=micro_batch_id)
-        # logger.log_message(f"Sent forward output_tensor {step} | {output_tensor.shape}", level=Level.DEBUG)
+        comm.send_forward(output_tensor, micro_batch_id)
 
         if world.is_last_stage:
             output_tensor = loss_fn(output_tensor.transpose(1, 2), micro_batch["target_ids"].to(device))
@@ -107,14 +75,12 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
     logger.log_message(f"All forward passes done ({len(input_tensors)})", level=Level.DEBUG)
     
     for micro_batch_id, micro_batch in enumerate(batch_loader): # All backward passes
-        output_tensor_grad = communicate(world, step, operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32, tag=micro_batch_id)
-        # logger.log_message(f"Received backward output_tensor_grad {step} | {output_tensor_grad.shape if output_tensor_grad is not None else 'None'}", level=Level.DEBUG)
+        output_tensor_grad = comm.recv_backward(micro_batch_id)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = sharded_model.backward(input_tensor, output_tensor, output_tensor_grad)
-        communicate(world, step, operation="send_backward", tensor=input_tensor_grad, tag=micro_batch_id)
-        # logger.log_message(f"Sent backward input_tensor_grad {step} | {input_tensor_grad.shape if input_tensor_grad is not None else 'None'}", level=Level.DEBUG)
+        comm.send_backward(input_tensor_grad, micro_batch_id)
     
-    # Update model parameters
+    # Optimize
     optimizer.step()
 
     # Synchronize timing
@@ -205,6 +171,10 @@ def main(config: PipelineConfig):
     scheduler = get_scheduler(config.train, optimizer, num_train_steps)
     loss_fn = nn.CrossEntropyLoss()
 
+    # Get communication
+    comm = Comm(world, tensor_shape, torch.float32)
+    logger.log_message(f"Initialized communication: {comm}")
+
     # Training loop
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Loss(), Perplexity(), Throughput()], name="train")
     train_bar = None
@@ -216,7 +186,7 @@ def main(config: PipelineConfig):
         batch = next(train_dataloader)
         logger.log_message(batch["input_ids"][:, 0], level=Level.DEBUG)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, sharded_model, micro_batchloader, loss_fn, optimizer, scheduler, device, world, config)
+        outputs = train(train_step, sharded_model, micro_batchloader, loss_fn, optimizer, scheduler, device, world, comm)
 
         # Compute and log metrics
         if world.is_last_stage:
