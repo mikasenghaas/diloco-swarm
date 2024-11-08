@@ -13,6 +13,8 @@ from torch.optim import AdamW
 from .config import ModelConfig, DataConfig, LoggingConfig, TrainConfig
 from .logger import CustomLogger
 from .metrics import Metrics
+from .world import World
+from .sharded_model import ShardedModel, ShardedLlamaModel, ShardedGPTModel, ModelType
 
 from typing import Optional, List, Dict, Tuple, Any
     
@@ -51,8 +53,26 @@ def get_dtype(dtype: str) -> torch.dtype:
 def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> CustomLogger:
     return CustomLogger(logging, name, run_id)
 
-def get_model(model: ModelConfig) -> AutoModelForCausalLM:
-    return AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
+def get_model(model: ModelConfig, device: Optional[torch.device] = None) -> AutoModelForCausalLM:
+    model = AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
+    return model.to(device) if device is not None else model
+
+def get_model_type(model: ModelConfig) -> ModelType:
+    if "llama" in model.name:
+        return ModelType.LLAMA
+    elif "gpt" in model.name:
+        return ModelType.GPT
+    else:
+        raise ValueError(f"Unknown model type: {model.name}")
+
+def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: ModelType) -> ShardedModel:
+    match model_type:
+        case ModelType.LLAMA:
+            return ShardedLlamaModel(model, world)
+        case ModelType.GPT:
+            return ShardedGPTModel(model, world)
+        case _:
+            raise ValueError(f"Unknown model type: {model_type}")
 
 def get_tokenizer(model: ModelConfig) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(model.name, fast=True, cache_dir=HF_CACHE_DIR)
@@ -80,22 +100,24 @@ def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
     return dataset
 
 def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
-    def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        batch_input_ids = torch.stack([torch.tensor(item['input_ids']) for item in batch])
         return {
-            'input_ids': torch.stack([torch.tensor(example['input_ids'][:-1]) for example in batch]),
-            'attention_mask': torch.stack([torch.tensor(example['attention_mask'][:-1]) for example in batch]),
-            'labels': torch.stack([torch.tensor(example['input_ids'][1:]) for example in batch]),
+            "input_ids": batch_input_ids[:, :-1].contiguous(),
+            "target_ids": batch_input_ids[:, 1:].contiguous(),
+            # "position_index": torch.arange(seq_len-1, dtype=torch.long).unsqueeze(1).expand(-1, batch_size).contiguous(),
+            # "attn_mask": torch.tril(torch.ones((seq_len-1, seq_len-1), dtype=torch.bool)).T.unsqueeze(0).expand(batch_size, -1, -1).contiguous(),
+            "hidden_states": None
         }
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
     return cycle_iter(dataloader) if cycle else iter(dataloader)
 
 def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) -> DataLoader:
     """Create a DataLoader for micro-batches from a single large batch."""
     class MicroBatchDataset(Dataset):
-        def __init__(self, input_ids, attention_mask, labels):
+        def __init__(self, input_ids, target_ids):
             self.input_ids = input_ids
-            self.attention_mask = attention_mask
-            self.labels = labels
+            self.target_ids = target_ids
 
         def __len__(self):
             return len(self.input_ids)
@@ -103,11 +125,10 @@ def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) 
         def __getitem__(self, idx):
             return {
                 'input_ids': self.input_ids[idx],
-                'attention_mask': self.attention_mask[idx],
-                'labels': self.labels[idx]
+                'target_ids': self.target_ids[idx],
             }
 
-    dataset = MicroBatchDataset(batch['input_ids'], batch['attention_mask'], batch["labels"])
+    dataset = MicroBatchDataset(batch['input_ids'], batch["target_ids"])
     return DataLoader(dataset, batch_size=micro_batch_size, shuffle=False)
 
 def tokenize(examples: Dict[str, Any], tokenizer: AutoTokenizer, max_length: int) -> Dict[str, Any]:
@@ -119,6 +140,7 @@ def get_train_pbar_description(metrics: Metrics, prefix: str):
     micro_time = curr_metrics.get(f"{metrics.name}/micro_time/current")
     loss = curr_metrics.get(f"{metrics.name}/loss/current")
     norm = curr_metrics.get(f"{metrics.name}/norm/current")
+    norm = 0 if norm is None else norm
     perplexity = curr_metrics.get(f"{metrics.name}/perplexity/current")
     throughput = curr_metrics.get(f"{metrics.name}/throughput/current")
     return f"{prefix} Step: {step} - Time: {micro_time*1000:.1f}ms - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
