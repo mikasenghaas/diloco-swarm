@@ -49,6 +49,9 @@ class ShardedModel(nn.Module, ABC):
         x = self.norm(x)
         return self.lm_head(x)
 
+    def __call__(self, **kwargs):
+        return self.forward(**kwargs)
+
     def backward(self, input_tensor, output_tensor, output_tensor_grad):
         if input_tensor is not None: input_tensor.retain_grad()
         if output_tensor_grad is None:
