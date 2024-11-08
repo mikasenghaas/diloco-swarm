@@ -16,8 +16,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
+from src.model import Model
 from src.logger import Level
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
+from src.utils import seed_everything, get_device, get_logger, get_model_type, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
 from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from pydantic_config import BaseConfig, parse_argv
@@ -30,7 +31,7 @@ class BaselineConfig(BaseConfig):
     sample: SampleConfig
     logging: LoggingConfig
 
-def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, config: BaselineConfig) -> Outputs:
+def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, config: BaselineConfig) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
@@ -42,8 +43,8 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, loss
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
         with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
-            outputs = model.forward(micro_batch["input_ids"])
-            loss = loss_fn(outputs.logits.transpose(1, 2), micro_batch["target_ids"])
+            logits = model(**micro_batch)
+            loss = loss_fn(logits.transpose(1, 2), micro_batch["target_ids"])
 
         # Scale loss
         loss = loss / grad_accumulation_steps
@@ -67,28 +68,62 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, loss
 
     return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
-def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor], device: torch.device) -> Outputs:
+def eval(step: int, model: Model, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device) -> Outputs:
     start = time.time()
     model.eval()
     batch = {k: v.to(device) for k, v in batch.items()}
     with torch.no_grad():
-        outputs = model(**batch)
+        logits = model(**batch)
+        loss = loss_fn(logits.transpose(1, 2), batch["target_ids"])
         num_examples = batch["input_ids"].shape[0]
         num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
 
     end = time.time()
     step_time = end - start
 
-    return Outputs(step=step, loss=outputs.loss.item(), num_tokens=num_tokens, num_examples=num_examples, time=step_time)
+    return Outputs(step=step, loss=loss.item(), num_tokens=num_tokens, num_examples=num_examples, time=step_time)
 
-def sample(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: torch.device, config: BaselineConfig) -> List[str]:
+def sample(model: Model, tokenizer: AutoTokenizer, device: torch.device, config: BaselineConfig) -> List[str]:
     model.eval()
     model.to(device)
     tokenizer.pad_token_id = tokenizer.eos_token_id
-    inputs = tokenizer(config.sample.prompt, return_tensors="pt").to(device)
-    with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
-        outputs = model.generate(**inputs, do_sample=True, max_new_tokens=config.sample.max_new_tokens, top_k=config.sample.top_k, top_p=config.sample.top_p, num_return_sequences=config.sample.num_return_sequences, temperature=config.sample.temperature)
-    return tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    
+    # Encode input prompt
+    input_tensor = tokenizer(config.sample.prompt, return_tensors="pt").to(device)
+    input_tensor = {k: v.repeat(config.sample.num_return_sequences, 1) for k, v in input_tensor.items()}
+    
+    # Track which sequences have completed
+    unfinished = torch.ones(config.sample.num_return_sequences, dtype=torch.bool).to(device)
+    
+    for _ in range(config.sample.max_new_tokens):
+        if not unfinished.any():
+            break
+            
+        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
+            # Forward
+            logits = model(**input_tensor)
+
+            # Get last logits
+            last_logits = logits[:, -1, :]
+
+            # Apply temperature scaling
+            last_scaled_logits = last_logits / config.sample.temperature
+            
+            # Apply top-k sampling
+            top_k_logits, top_k_indices = torch.topk(last_scaled_logits, k=config.sample.top_k, dim=-1)
+            probs = torch.softmax(top_k_logits, dim=-1)
+            next_token_idx = torch.multinomial(probs, num_samples=1)
+            next_token = top_k_indices.gather(-1, next_token_idx).squeeze(-1)
+            next_token = torch.where(unfinished, next_token, tokenizer.pad_token_id)
+            
+            # Update which sequences are finished
+            unfinished = unfinished & (next_token != tokenizer.eos_token_id)
+            
+            # Append to input sequence
+            input_tensor["input_ids"] = torch.cat((input_tensor["input_ids"], next_token.unsqueeze(1)), dim=1)
+            input_tensor["attention_mask"] = torch.cat((input_tensor["attention_mask"], unfinished.unsqueeze(1)), dim=1)
+
+    return tokenizer.batch_decode(input_tensor["input_ids"], skip_special_tokens=True)
 
 def main(config: BaselineConfig):
     # Set precision and seed

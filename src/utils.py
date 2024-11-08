@@ -1,6 +1,7 @@
 import os
 import math
 import torch
+import torch.nn as nn
 import numpy as np
 from dotenv import load_dotenv
 from itertools import cycle as cycle_iter
@@ -14,7 +15,7 @@ from .config import ModelConfig, DataConfig, LoggingConfig, TrainConfig
 from .logger import CustomLogger
 from .metrics import Metrics
 from .world import World
-from .sharded_model import ShardedModel, ShardedLlamaModel, ShardedGPTModel, ModelType
+from .model import Model, ShardedModel, ShardedLlamaModel, ShardedGPTModel, ModelType
 
 from typing import Optional, List, Dict, Tuple, Any
     
@@ -53,10 +54,6 @@ def get_dtype(dtype: str) -> torch.dtype:
 def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> CustomLogger:
     return CustomLogger(logging, name, run_id)
 
-def get_model(model: ModelConfig, device: Optional[torch.device] = None) -> AutoModelForCausalLM:
-    model = AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
-    return model.to(device) if device is not None else model
-
 def get_model_type(model: ModelConfig) -> ModelType:
     if "llama" in model.name:
         return ModelType.LLAMA
@@ -64,6 +61,10 @@ def get_model_type(model: ModelConfig) -> ModelType:
         return ModelType.GPT
     else:
         raise ValueError(f"Unknown model type: {model.name}")
+
+def get_model(model: ModelConfig) -> Model:
+    base_model = AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
+    return Model(base_model)
 
 def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: ModelType) -> ShardedModel:
     match model_type:
