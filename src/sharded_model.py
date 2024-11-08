@@ -26,8 +26,8 @@ class ShardedModel(nn.Module, ABC):
         start_layer = sum(layers_per_gpu[:self.world.local_rank])
         return list(range(start_layer, start_layer + layers_per_gpu[self.world.local_rank]))
 
-    def forward(self, batch):
-        x = batch["hidden_states"] if batch["hidden_states"] is not None else batch["input_ids"]
+    def forward(self, input_ids, hidden_states=None, **kwargs):
+        x = hidden_states if hidden_states is not None else input_ids
         x = self.embed_tokens(x)
         for layer in self.decoder_layers.values():
             x = layer(x)[0]
