@@ -11,7 +11,7 @@ import autorootcwd
 import os
 import time
 from tqdm import tqdm
-from typing import List
+from typing import List, Dict
 from datetime import datetime
 
 import torch
@@ -24,7 +24,7 @@ from datasets import disable_progress_bar
 
 from src.logger import Level
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
-from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_model_type, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description
+from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_model_type, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description
 from src.world import World
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Examples, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 from src.comm import Comm
@@ -42,7 +42,6 @@ class PipelineConfig(BaseConfig):
     logging: LoggingConfig
 
 def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, world: World, comm: Comm, max_norm: float) -> Outputs:
-    global logger
     start = time.time()
     sharded_model.train()
     sharded_model.to(device)
@@ -93,8 +92,28 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
 
     return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
-def eval() -> Outputs:
-    pass
+def eval(step: int, sharded_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: Comm) -> Outputs:
+    start = time.time()
+    sharded_model.eval()
+    batch_loss = 0.0
+    batch_tokens, batch_examples = 0, 0
+    with torch.no_grad():
+        input_tensor = comm.recv_forward(0)
+        batch["hidden_states"] = input_tensor
+        batch = {k: v.to(device) if v is not None else v for k, v in batch.items()}
+        output_tensor = sharded_model.forward(**batch)
+        comm.send_forward(output_tensor, 0)
+
+        if world.is_last_stage:
+            output_tensor = loss_fn(output_tensor.transpose(1, 2), batch["target_ids"].to(device))
+            batch_loss += output_tensor.detach().item()
+            batch_examples += batch["input_ids"].shape[0]
+            batch_tokens += batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
+    
+    end = time.time()
+    step_time = end - start
+
+    return Outputs(step=step, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, time=step_time)
 
 def sample() -> List[str]:
     pass
@@ -189,8 +208,10 @@ def main(config: PipelineConfig):
 
     # Training loop
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Loss(), Perplexity(), Throughput(), Norm(), LearningRate()], name="train")
-    train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True) if world.is_last_stage else None
-    for train_step in range(1, num_train_steps+1):
+    eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
+    train_range = range(1, num_train_steps+1)
+    train_bar = tqdm(train_range, position=0, leave=True) if world.is_last_stage else None
+    for train_step in train_range:
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
@@ -203,6 +224,27 @@ def main(config: PipelineConfig):
             logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
             train_bar.set_description(get_train_pbar_description(train_metrics, prefix="[TRAIN]"))
             train_bar.update()
+
+        # Validate
+        if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
+            eval_range = range(1, num_eval_steps+1)
+            eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_last_stage else None
+            eval_metrics.reset()
+            for eval_step in eval_range:
+                # Eval step
+                batch = next(val_dataloader)
+                outputs = eval(eval_step, sharded_model, batch, loss_fn, device, world, comm)
+
+                # Compute log metrics
+                if world.is_last_stage:
+                    eval_metrics.update(outputs)
+                    eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]"))
+                    eval_bar.update()
+
+            # Log eval metrics
+            if world.is_last_stage:
+                curr_metrics = eval_metrics.compute()
+                logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
 
     # Destroy process group
     if world.world_size > 1:
