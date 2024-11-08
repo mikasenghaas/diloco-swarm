@@ -66,7 +66,6 @@ class ConsoleLoggingConfig(BaseConfig):
 class FileLoggingConfig(BaseConfig):
     enable: bool
     log_level: str = "DEBUG"
-    name: str = "output.log"
 
 class WandbLoggingConfig(BaseConfig):
     enable: bool

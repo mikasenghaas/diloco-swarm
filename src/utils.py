@@ -5,7 +5,7 @@ import numpy as np
 from dotenv import load_dotenv
 from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
-from datasets import Dataset, load_dataset, load_from_disk
+from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
@@ -14,7 +14,7 @@ from .config import ModelConfig, DataConfig, LoggingConfig, TrainConfig
 from .logger import CustomLogger
 from .metrics import Metrics
 
-from typing import List, Dict, Any
+from typing import Optional, List, Dict, Tuple, Any
     
 def seed_everything(seed: int):
     torch.manual_seed(seed)
@@ -32,17 +32,24 @@ def get_persistent_dir() -> str | None:
 
 HF_CACHE_DIR = os.path.join(get_persistent_dir(), "huggingface")
 
-def get_device() -> torch.device:
+def get_world() -> Tuple[int, int]:
+    msg = "Try running with `torchrun --nproc_per_node <num_gpus> <script>.py`"
+    assert "LOCAL_RANK" in os.environ and "WORLD_SIZE" in os.environ, f"LOCAL_RANK and WORLD_SIZE environment variable is not set. {msg}"
+    local_rank = int(os.getenv("LOCAL_RANK"))
+    world_size = int(os.getenv("WORLD_SIZE"))
+    return local_rank, world_size
+
+def get_device(local_rank: Optional[int] = None) -> torch.device:
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        return torch.device("cuda", local_rank)
     else:
         raise RuntimeError("No CUDA device available.")
 
 def get_dtype(dtype: str) -> torch.dtype:
     return getattr(torch, dtype)
 
-def get_logger(logging: LoggingConfig) -> CustomLogger:
-    return CustomLogger(logging)
+def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> CustomLogger:
+    return CustomLogger(logging, name, run_id)
 
 def get_model(model: ModelConfig) -> AutoModelForCausalLM:
     return AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
