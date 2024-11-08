@@ -24,9 +24,9 @@ from datasets import disable_progress_bar
 
 from src.logger import Level
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
-from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_model_type, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, format_int, get_train_pbar_description
+from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_model_type, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description
 from src.world import World
-from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Examples, Tokens, Loss, Perplexity, Throughput
+from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Examples, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 from src.comm import Comm
 from pydantic_config import BaseConfig, parse_argv
 
@@ -41,21 +41,21 @@ class PipelineConfig(BaseConfig):
     sample: SampleConfig
     logging: LoggingConfig
 
-def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, world: World, comm: Comm) -> Outputs:
+def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, world: World, comm: Comm, max_norm: float) -> Outputs:
     global logger
     start = time.time()
     sharded_model.train()
     sharded_model.to(device)
     optimizer.zero_grad()
     
-    # Initialize batch loss
+    # Initialization
     batch_loss = torch.Tensor([0.0]).to(device)
     batch_tokens, batch_examples = 0, 0
-
-    # Initialize input and output tensors (for communication)
     input_tensors, output_tensors = [], []
+
+    # Forward
     grad_accumulation_steps = len(batch_loader)
-    for micro_batch_id, micro_batch in enumerate(batch_loader): # All forward passes
+    for micro_batch_id, micro_batch in enumerate(batch_loader):
         input_tensor = comm.recv_forward(micro_batch_id)
         micro_batch["hidden_states"] = input_tensor
         micro_batch = {k: v.to(device) if v is not None else v for k, v in micro_batch.items()}
@@ -72,25 +72,26 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
     
-    logger.log_message(f"All forward passes done ({len(input_tensors)})", level=Level.DEBUG)
-    
-    for micro_batch_id, micro_batch in enumerate(batch_loader): # All backward passes
+    # Backward
+    for micro_batch_id, micro_batch in enumerate(batch_loader): 
         output_tensor_grad = comm.recv_backward(micro_batch_id)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = sharded_model.backward(input_tensor, output_tensor, output_tensor_grad)
         comm.send_backward(input_tensor_grad, micro_batch_id)
     
-    # Optimize
+    # Optimizer and scheduler step
+    norm = torch.nn.utils.clip_grad_norm_(sharded_model.parameters(), max_norm=max_norm)
+    lr = scheduler.get_last_lr()[0]
     optimizer.step()
+    scheduler.step()
 
-    # Synchronize timing
+    # Synchronization and timing
     torch.cuda.synchronize()
     end = time.time()
     step_time = end - start
     micro_step_time = step_time / grad_accumulation_steps
 
-    return Outputs(step=step, lr=None, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=None, time=step_time, micro_step_time=micro_step_time)
-
+    return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
 def eval() -> Outputs:
     pass
@@ -155,16 +156,26 @@ def main(config: PipelineConfig):
     
     # Prepare data loaders
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=True, cycle=True)
-    # val_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=True, cycle=True)
-    # test_dataloader = get_dataloader(test_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=True)
+    val_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=True, cycle=True)
+    test_dataloader = get_dataloader(test_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=True)
 
-    # TODO: Compute based on config
-    num_train_steps = config.train.max_steps
-    
-    # Setup tensor shapes for communication
-    B, L, H = config.train.micro_batch_size, config.data.seq_length, model.config.hidden_size
-    tensor_shape = (B, L, H)
-    logger.log_message(f"Tensor shapes: {tensor_shape}")
+    # Compute number of training steps
+    num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
+    num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.train.micro_batch_size)
+    num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.train.micro_batch_size)
+
+    # Get training, evaluation and testing setup
+    train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
+    eval_setup = get_train_setup(num_eval_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
+    test_setup = get_train_setup(num_test_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(test_data))
+
+    logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]))
+    logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
+    logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]))
+
+    # Compute grad accumulation steps
+    grad_accumulation_steps = config.train.batch_size // config.train.micro_batch_size
+    assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
 
     # Set up optimizer
     optimizer = get_optimizer(config.train, sharded_model)
@@ -172,23 +183,20 @@ def main(config: PipelineConfig):
     loss_fn = nn.CrossEntropyLoss()
 
     # Get communication
-    comm = Comm(world, tensor_shape, torch.float32)
+    B, L, H = config.train.micro_batch_size, config.data.seq_length, model.config.hidden_size
+    comm = Comm(world, (B, L, H), torch.float32)
     logger.log_message(f"Initialized communication: {comm}")
 
     # Training loop
-    train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Loss(), Perplexity(), Throughput()], name="train")
-    train_bar = None
-    if world.is_last_stage:
-        train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
-    
+    train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Loss(), Perplexity(), Throughput(), Norm(), LearningRate()], name="train")
+    train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True) if world.is_last_stage else None
     for train_step in range(1, num_train_steps+1):
         # Train step
         batch = next(train_dataloader)
-        logger.log_message(batch["input_ids"][:, 0], level=Level.DEBUG)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, sharded_model, micro_batchloader, loss_fn, optimizer, scheduler, device, world, comm)
+        outputs = train(train_step, sharded_model, micro_batchloader, loss_fn, optimizer, scheduler, device, world, comm, max_norm=config.train.max_norm)
 
-        # Compute and log metrics
+        # Compute and log metrics (only last stage)
         if world.is_last_stage:
             train_metrics.update(outputs)
             curr_metrics = train_metrics.compute()
