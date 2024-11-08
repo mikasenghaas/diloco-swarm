@@ -8,6 +8,7 @@ import time
 from typing import Dict, List
 
 import torch
+import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -29,7 +30,7 @@ class BaselineConfig(BaseConfig):
     sample: SampleConfig
     logging: LoggingConfig
 
-def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, config: BaselineConfig) -> Outputs:
+def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, config: BaselineConfig) -> Outputs:
     start = time.time()
     model.train()
     model.to(device)
@@ -41,10 +42,11 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, opti
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
         with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
-            outputs = model(**micro_batch)
+            outputs = model.forward(micro_batch["input_ids"])
+            loss = loss_fn(outputs.logits.transpose(1, 2), micro_batch["target_ids"])
 
         # Scale loss
-        loss = outputs.loss / grad_accumulation_steps
+        loss = loss / grad_accumulation_steps
         
         # Backward
         loss.backward()
@@ -142,7 +144,6 @@ def main(config: BaselineConfig):
     logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
     logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]))
 
-
     # Compute grad accumulation steps
     grad_accumulation_steps = config.train.batch_size // config.train.micro_batch_size
     assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
@@ -150,6 +151,7 @@ def main(config: BaselineConfig):
     # Set up optimizer
     optimizer = get_optimizer(config.train, model)
     scheduler = get_scheduler(config.train, optimizer, num_train_steps)
+    loss_fn = nn.CrossEntropyLoss()
 
     # Start Training
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
@@ -159,7 +161,7 @@ def main(config: BaselineConfig):
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, model, micro_batchloader, optimizer, scheduler, device, config)
+        outputs = train(train_step, model, micro_batchloader, loss_fn, optimizer, scheduler, device, config)
         
         # Compute and log metrics
         train_metrics.update(outputs)
