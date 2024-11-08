@@ -10,10 +10,10 @@ class World:
             dist.init_process_group(backend="nccl")
             self.group = dist.new_group(list(range(self.world_size)))
 
-    def get_next_rank(self) -> int:
+    def next_rank(self) -> int:
         return None if self.local_rank == self.world_size - 1 else (self.local_rank + 1) % self.world_size
 
-    def get_prev_rank(self) -> int:
+    def prev_rank(self) -> int:
         return None if self.local_rank == 0 else (self.local_rank - 1) % self.world_size
 
     @property
