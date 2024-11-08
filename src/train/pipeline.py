@@ -49,7 +49,7 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
     optimizer.zero_grad()
     
     # Initialization
-    batch_loss = torch.Tensor([0.0]).to(device)
+    batch_loss = 0.0
     batch_tokens, batch_examples = 0, 0
     input_tensors, output_tensors = [], []
 
@@ -59,13 +59,13 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
         input_tensor = comm.recv_forward(micro_batch_id)
         micro_batch["hidden_states"] = input_tensor
         micro_batch = {k: v.to(device) if v is not None else v for k, v in micro_batch.items()}
-        output_tensor = sharded_model.forward(micro_batch)
+        output_tensor = sharded_model.forward(**micro_batch)
         comm.send_forward(output_tensor, micro_batch_id)
 
         if world.is_last_stage:
             output_tensor = loss_fn(output_tensor.transpose(1, 2), micro_batch["target_ids"].to(device))
             output_tensor = output_tensor / grad_accumulation_steps
-            batch_loss += output_tensor.detach()
+            batch_loss += output_tensor.detach().item()
             batch_examples += micro_batch["input_ids"].shape[0]
             batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 

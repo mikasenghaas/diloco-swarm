@@ -35,7 +35,7 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, loss
     model.train()
     model.to(device)
     optimizer.zero_grad()
-    batch_loss = torch.Tensor([0.0]).to(device)
+    batch_loss = 0.0
     batch_tokens, batch_examples = 0, 0
 
     grad_accumulation_steps = len(batch_loader)
@@ -51,7 +51,7 @@ def train(step: int, model: AutoModelForCausalLM, batch_loader: DataLoader, loss
         # Backward
         loss.backward()
 
-        batch_loss += loss.detach()
+        batch_loss += loss.detach().item()
         batch_examples += micro_batch["input_ids"].shape[0]
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
@@ -76,7 +76,10 @@ def eval(step: int, model: AutoModelForCausalLM, batch: Dict[str, torch.Tensor],
         num_examples = batch["input_ids"].shape[0]
         num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
 
-        return Outputs(step=step, loss=outputs.loss, num_tokens=num_tokens, num_examples=num_examples, time=time.time() - start)
+    end = time.time()
+    step_time = end - start
+
+    return Outputs(step=step, loss=outputs.loss.item(), num_tokens=num_tokens, num_examples=num_examples, time=step_time)
 
 def sample(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device: torch.device, config: BaselineConfig) -> List[str]:
     model.eval()

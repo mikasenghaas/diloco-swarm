@@ -1,4 +1,4 @@
-import torch
+import math
 from typing import List, Dict
 from pydantic import BaseModel, ConfigDict
 from abc import ABC, abstractmethod
@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 class Outputs(BaseModel):
     step: int
     time: float
-    loss: torch.Tensor
+    loss: float
     num_tokens: int
     num_examples: int
     lr: float | None = None
@@ -120,7 +120,7 @@ class Loss(Metric):
         self.losses : List[float] = []
 
     def update(self, outputs: Outputs):
-        self.losses.append(outputs.loss.item())
+        self.losses.append(outputs.loss)
 
     def compute(self) -> Dict[str, float]:
         return {"current": self.losses[-1], "average": sum(self.losses) / len(self.losses)}
@@ -134,7 +134,7 @@ class Perplexity(Metric):
         self.perplexities : List[float] = []
 
     def update(self, outputs: Outputs):
-        self.perplexities.append(torch.exp(outputs.loss).item())
+        self.perplexities.append(math.exp(outputs.loss))
 
     def compute(self) -> Dict[str, float]:
         return {"current": self.perplexities[-1], "average": sum(self.perplexities) / len(self.perplexities)}
