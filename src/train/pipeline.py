@@ -21,6 +21,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from datasets import disable_progress_bar
+from transformers import AutoTokenizer
 
 from src.logger import Level
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
@@ -115,8 +116,45 @@ def eval(step: int, sharded_model: nn.Module, batch: Dict[str, torch.Tensor], lo
 
     return Outputs(step=step, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, time=step_time)
 
-def sample() -> List[str]:
-    pass
+def sample(sharded_model: nn.Module, tokenizer: AutoTokenizer, device: torch.device, world: World, comm: Comm, config: PipelineConfig) -> List[str]:
+    sharded_model.eval()
+    sharded_model.to(device)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    # Encode input prompt
+    input_tensor = tokenizer(config.sample.prompt, return_tensors="pt").to(device)
+    input_tensor = {k: v.repeat(config.sample.num_return_sequences, 1) for k, v in input_tensor.items()}
+    
+    while True:
+        input_tensor = comm.recv_forward(0)
+        if input_tensor.shape[1] >= config.sample.max_new_tokens: break
+        output_tensor = sharded_model(**input_tensor)
+        comm.send_forward(output_tensor, 0)
+
+        if world.is_last_stage:
+            last_logits = output_tensor[:, -1, :]
+
+            # Apply temperature scaling
+            last_scaled_logits = last_logits / config.sample.temperature
+            
+            # Apply top-k sampling
+            top_k_logits, top_k_indices = torch.topk(last_scaled_logits, k=config.sample.top_k, dim=-1)
+            probs = torch.softmax(top_k_logits, dim=-1)
+            next_token_idx = torch.multinomial(probs, num_samples=1)
+            next_token = top_k_indices.gather(-1, next_token_idx).squeeze(-1)
+            next_token = torch.where(unfinished, next_token, tokenizer.pad_token_id)
+            
+            # Update which sequences are finished
+            unfinished = unfinished & (next_token != tokenizer.eos_token_id)
+            
+            # Append to input sequence
+            input_tensor["input_ids"] = torch.cat((input_tensor["input_ids"], next_token.unsqueeze(1)), dim=1)
+            input_tensor["attention_mask"] = torch.cat((input_tensor["attention_mask"], unfinished.unsqueeze(1)), dim=1)
+
+            # Send updated input tensor to first stage
+            comm.send_forward(input_tensor, 0)
+
+    return tokenizer.batch_decode(input_tensor["input_ids"], skip_special_tokens=True)
 
 def main(config: PipelineConfig):
     global logger
@@ -153,12 +191,15 @@ def main(config: PipelineConfig):
     # Get sharded model
     sharded_model = get_sharded_model(model, world, get_model_type(config.model))
     logger.log_message(f"Sharded model '{config.model.name}' ({format_int(sharded_model.num_parameters(), 2)} parameters)")
-    # logger.log_message(str(sharded_model))
 
     # Load tokenizer
     tokenizer = get_tokenizer(config.model)
     tokenizer.pad_token = tokenizer.eos_token
     logger.log_message(f"Loaded tokenizer '{config.model.name}' ({format_int(len(tokenizer), 0)} vocab size)")
+
+    samples = sample(sharded_model, tokenizer, device, world, comm, config)
+    logger.log_samples(samples, 0)
+    exit(0)
 
     # Load and split dataset
     train_data = get_dataset(config.data, split="train")
@@ -245,6 +286,11 @@ def main(config: PipelineConfig):
             if world.is_last_stage:
                 curr_metrics = eval_metrics.compute()
                 logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
+
+        # Sample
+        if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
+            samples = sample(sharded_model, tokenizer, device, config)
+            logger.log_samples(samples, train_step)
 
     # Destroy process group
     if world.world_size > 1:

@@ -40,5 +40,9 @@ class Comm:
         self.synchronize(req)
         return tensor
 
+    def send_to(self, tensor: torch.Tensor, peer: int, tag: int) -> None:
+        req = dist.isend(tensor, dst=peer, tag=tag)
+        self.synchronize(req)
+
     def __str__(self):
         return f"Comm(world={self.world}, shape={self.shape}, dtype={self.dtype})"
