@@ -1,7 +1,7 @@
 import os
 import yaml
 import logging
-from typing import Dict, List
+from typing import Optional, Dict, List
 from enum import Enum
 from datetime import datetime
 
@@ -18,19 +18,20 @@ class Level(Enum):
 
 class CustomLogger:
     """A logger that logs to console, file, and wandb."""
-    def __init__(self, config: LoggingConfig):
+    def __init__(self, config: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None):
         self.config = config
         self.console_logger = None
         self.file_logger = None
         self.wandb_run = None
-        self.run_id = None
         self.log_dir = None
         self.checkpoint_dir = None
+
+        self.name = name if name else "master"
+        self.run_id = run_id if run_id else datetime.now().strftime("%Y%m%d_%H%M%S")
         self.setup()
 
     def setup(self):
         # Create log directory
-        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_dir = os.path.join(self.config.log_dir, self.run_id)
         self.checkpoint_dir = os.path.join(self.log_dir, "checkpoints")
         self.samples_dir = os.path.join(self.log_dir, "samples")
@@ -50,19 +51,19 @@ class CustomLogger:
 
         # Set up console logging
         if self.config.console.enable:
-            self.console_logger = logging.getLogger('console')
+            self.console_logger = logging.getLogger(f'console-{self.name}')
             self.console_logger.setLevel(self.config.console.log_level)
-            formatter = logging.Formatter('[%(levelname)s] %(message)s')
+            formatter = logging.Formatter(f'[%(levelname)s][{self.name}] %(message)s')
             stream_handler = logging.StreamHandler()
             stream_handler.setFormatter(formatter)
             self.console_logger.addHandler(stream_handler)
 
         # Set up file logging
         if self.config.file.enable:
-            self.file_logger = logging.getLogger('file')
+            self.file_logger = logging.getLogger(f'file-{self.name}')
             self.file_logger.setLevel(self.config.file.log_level)
-            formatter = logging.Formatter('[%(levelname)s]\t%(asctime)s\t%(message)s')
-            file_handler = logging.FileHandler(os.path.join(self.log_dir, self.config.file.name))
+            formatter = logging.Formatter(f'[%(levelname)s][{self.name}] %(asctime)s %(message)s')
+            file_handler = logging.FileHandler(os.path.join(self.log_dir, f"{self.name}.log"))
             file_handler.setFormatter(formatter)
             self.file_logger.addHandler(file_handler)
 
