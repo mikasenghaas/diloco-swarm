@@ -5,11 +5,13 @@ from typing import Optional, Dict, List
 from enum import Enum
 from datetime import datetime
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch.nn as nn
+from transformers import AutoTokenizer
 from pydantic_config import BaseConfig
 import wandb
 
 from .config import LoggingConfig
+from .ckpt import Checkpoint
 
 class Level(Enum):
     DEBUG = logging.DEBUG
@@ -29,6 +31,8 @@ class CustomLogger:
         self.name = name if name else "master"
         self.run_id = run_id if run_id else datetime.now().strftime("%Y%m%d_%H%M%S")
         self.setup()
+
+        self.checkpoint = Checkpoint(self.checkpoint_dir)
 
     def setup(self):
         # Create log directory
@@ -86,16 +90,12 @@ class CustomLogger:
         if self.wandb_run:
             wandb.log(metrics, step=step)
 
-    def log_checkpoint(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, step: int, level: Level = Level.INFO) -> None:
-        model_size = 4 * model.num_parameters() / 1e9
-        self.log_message(f"Saved model checkpoint at step {step} (Size: {model_size:.2f}GB)", level=level)
-        checkpoint_dir = os.path.join(self.checkpoint_dir, f"{step}")
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        model.save_pretrained(checkpoint_dir)
-        tokenizer.save_pretrained(checkpoint_dir)
+    def log_checkpoint(self, step: int, model: nn.Module, config: BaseConfig, level: Level = Level.INFO) -> None:
+        checkpoint_dir = self.checkpoint.save(step, model, config)
+        self.log_message(f"Saved model checkpoint at step {step}", level=level)
 
         if self.wandb_run:
-            artifact = wandb.Artifact(name=str(step), type="model")
+            artifact = wandb.Artifact(name=f"model-{step}", type="model")
             artifact.add_dir(checkpoint_dir)
             wandb.log_artifact(artifact)
 
@@ -109,7 +109,7 @@ class CustomLogger:
                 f.write(sample + "\n")
 
         if self.wandb_run:
-            artifact = wandb.Artifact(name=str(step), type="samples")
+            artifact = wandb.Artifact(name=f"samples-{step}", type="samples")
             artifact.add_file(sample_path)
             wandb.log_artifact(artifact)
 

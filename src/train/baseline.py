@@ -1,5 +1,7 @@
 """
 Single-GPU LLM pre-training.
+
+python src/train/baseline.py @configs/debug.toml --model @configs/model/llama2-9m.toml --data @configs/data/wikitext.toml
 """
 import autorootcwd
 
@@ -12,13 +14,13 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
 from src.model import Model
 from src.logger import Level
-from src.utils import seed_everything, get_device, get_logger, get_model_type, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
 from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from pydantic_config import BaseConfig, parse_argv
@@ -31,37 +33,57 @@ class BaselineConfig(BaseConfig):
     sample: SampleConfig
     logging: LoggingConfig
 
-def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, config: BaselineConfig) -> Outputs:
+def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, dtype: str, max_norm: float) -> Outputs:
+    # Prepare model
     start = time.time()
-    model.train()
     model.to(device)
-    optimizer.zero_grad()
+    model.train()
+
+    # Prepare statistics
     batch_loss = 0.0
     batch_tokens, batch_examples = 0, 0
 
+    # Zero-out gradient
+    optimizer.zero_grad()
     grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
+        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(dtype)):
+            # Forward
             logits = model(**micro_batch)
-            loss = loss_fn(logits.transpose(1, 2), micro_batch["target_ids"])
 
-        # Scale loss
-        loss = loss / grad_accumulation_steps
+            # Reshape logits and targets for loss calculation
+            mask = micro_batch["attention_mask"]  # [B, L]
+            logits_flat = logits.view(-1, logits.size(-1))  # [B*L, V]
+            targets_flat = micro_batch["target_ids"].view(-1)  # [B*L]
+            
+            # Apply mask by filtering out padded positions
+            mask_flat = mask.view(-1)  # [B*L]
+            logits_filtered = logits_flat[mask_flat.bool()]  # [(B*L)', V]
+            targets_filtered = targets_flat[mask_flat.bool()]  # [(B*L)']
+            
+            # Calculate loss only on non-padded positions
+            loss = loss_fn(logits_filtered, targets_filtered)
         
-        # Backward
+        # Backward with scaled loss
+        loss = loss / grad_accumulation_steps
         loss.backward()
 
+        # Compute statistics
         batch_loss += loss.detach().item()
         batch_examples += micro_batch["input_ids"].shape[0]
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.train.max_norm)
-    lr = scheduler.get_last_lr()[0]
+    # Step optimizer and scheduler
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
     optimizer.step()
+    lr = scheduler.get_last_lr()[0]
     scheduler.step()
 
+    # Synchronize CUDA
     torch.cuda.synchronize()
+
+    # Compute step time
     end = time.time()
     step_time = end - start
     micro_step_time = step_time / grad_accumulation_steps
@@ -69,12 +91,31 @@ def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module,
     return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
 def eval(step: int, model: Model, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device) -> Outputs:
+    # Prepare model
     start = time.time()
+    model.to(device)
     model.eval()
+
+    # Prepare batch
     batch = {k: v.to(device) for k, v in batch.items()}
     with torch.no_grad():
+        # Forward
         logits = model(**batch)
-        loss = loss_fn(logits.transpose(1, 2), batch["target_ids"])
+
+        # Reshape logits and targets for loss calculation
+        mask = batch["attention_mask"]  # [B, L]
+        logits_flat = logits.view(-1, logits.size(-1))  # [B*L, V]
+        targets_flat = batch["target_ids"].view(-1)  # [B*L]
+        
+        # Apply mask by filtering out padded positions
+        mask_flat = mask.view(-1)  # [B*L]
+        logits_filtered = logits_flat[mask_flat.bool()]  # [(B*L)', V]
+        targets_filtered = targets_flat[mask_flat.bool()]  # [(B*L)']
+        
+        # Calculate loss only on non-padded positions
+        loss = loss_fn(logits_filtered, targets_filtered)
+
+        # Compute statistics
         num_examples = batch["input_ids"].shape[0]
         num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
 
@@ -83,48 +124,36 @@ def eval(step: int, model: Model, batch: Dict[str, torch.Tensor], loss_fn: nn.Mo
 
     return Outputs(step=step, loss=loss.item(), num_tokens=num_tokens, num_examples=num_examples, time=step_time)
 
-def sample(model: Model, tokenizer: AutoTokenizer, device: torch.device, config: BaselineConfig) -> List[str]:
-    model.eval()
+def sample(model: Model, tokenizer: AutoTokenizer, prompt: str, max_new_tokens: int, device: torch.device) -> List[str]:
+    # Prepare model
     model.to(device)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
+    model.eval()
+
+    # Prepare input
+    input_ids = tokenize(prompt, tokenizer)["input_ids"].to(device)
+
+    generated_ids = []
+    with torch.no_grad():
+        while len(generated_ids) < max_new_tokens:
+            # Get model predictions
+            outputs = model(input_ids=input_ids)
+            next_token_logits = outputs[:, -1, :]
+            
+            # Sample next token
+            next_token = torch.argmax(next_token_logits, dim=-1)
+            
+            # Break if EOS token
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+                
+            # Append to generated sequence
+            generated_ids.append(next_token.item())
+            input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+
+    # Decode the generated text
+    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    return [f"{prompt} {generated_text}".strip()]
     
-    # Encode input prompt
-    input_tensor = tokenizer(config.sample.prompt, return_tensors="pt").to(device)
-    input_tensor = {k: v.repeat(config.sample.num_return_sequences, 1) for k, v in input_tensor.items()}
-    
-    # Track which sequences have completed
-    unfinished = torch.ones(config.sample.num_return_sequences, dtype=torch.bool).to(device)
-    
-    for _ in range(config.sample.max_new_tokens):
-        if not unfinished.any():
-            break
-            
-        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.train.amp.dtype)):
-            # Forward
-            logits = model(**input_tensor)
-
-            # Get last logits
-            last_logits = logits[:, -1, :]
-
-            # Apply temperature scaling
-            last_scaled_logits = last_logits / config.sample.temperature
-            
-            # Apply top-k sampling
-            top_k_logits, top_k_indices = torch.topk(last_scaled_logits, k=config.sample.top_k, dim=-1)
-            probs = torch.softmax(top_k_logits, dim=-1)
-            next_token_idx = torch.multinomial(probs, num_samples=1)
-            next_token = top_k_indices.gather(-1, next_token_idx).squeeze(-1)
-            next_token = torch.where(unfinished, next_token, tokenizer.pad_token_id)
-            
-            # Update which sequences are finished
-            unfinished = unfinished & (next_token != tokenizer.eos_token_id)
-            
-            # Append to input sequence
-            input_tensor["input_ids"] = torch.cat((input_tensor["input_ids"], next_token.unsqueeze(1)), dim=1)
-            input_tensor["attention_mask"] = torch.cat((input_tensor["attention_mask"], unfinished.unsqueeze(1)), dim=1)
-
-    return tokenizer.batch_decode(input_tensor["input_ids"], skip_special_tokens=True)
-
 def main(config: BaselineConfig):
     # Set precision and seed
     seed_everything(config.train.seed)
@@ -142,25 +171,25 @@ def main(config: BaselineConfig):
     logger.log_message(f"Using device: {device}")
 
     # Load model
-    model = get_model(config.model)
+    model = get_model(config.model.name)
     logger.log_message(f"Loaded model '{config.model.name}' ({format_int(model.num_parameters(), 2)} parameters)")
 
     # Load tokenizer
-    tokenizer = get_tokenizer(config.model)
+    tokenizer = get_tokenizer(config.model.name)
     tokenizer.pad_token = tokenizer.eos_token
     logger.log_message(f"Loaded tokenizer '{config.model.name}' ({format_int(len(tokenizer), 0)} vocab size)")
 
     # Load and split dataset
-    train_data = get_dataset(config.data, split="train")
-    val_data = get_dataset(config.data, split="validation")
-    test_data = get_dataset(config.data, split="test")
+    train_data = get_dataset(config.data.path, config.data.name, split="train")
+    val_data = get_dataset(config.data.path, config.data.name, split="validation")
+    test_data = get_dataset(config.data.path, config.data.name, split="test")
     logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
     seq_length = config.data.seq_length
-    train_data = train_data.map(lambda examples: tokenize(examples, tokenizer, seq_length), batched=True, num_proc=os.cpu_count())
-    val_data = val_data.map(lambda examples: tokenize(examples, tokenizer, seq_length), batched=True, num_proc=os.cpu_count())
-    test_data = test_data.map(lambda examples: tokenize(examples, tokenizer, seq_length), batched=True, num_proc=os.cpu_count())
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders
@@ -187,9 +216,14 @@ def main(config: BaselineConfig):
     assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
 
     # Set up optimizer
-    optimizer = get_optimizer(config.train, model)
-    scheduler = get_scheduler(config.train, optimizer, num_train_steps)
+    optimizer = get_optimizer(model, config.train.optimizer.lr, config.train.optimizer.weight_decay, config.train.optimizer.betas)
+    scheduler = get_scheduler(optimizer, num_train_steps, config.train.scheduler.num_warmup_steps, config.train.scheduler.num_cycles, config.train.scheduler.min_lr_factor, config.train.scheduler.last_epoch, config.train.scheduler.enable)
     loss_fn = nn.CrossEntropyLoss()
+
+    # Sample before training
+    if config.sample.enable:
+        samples = sample(model, tokenizer, config.sample.prompt, config.sample.max_new_tokens, device)
+        logger.log_samples(samples, 0)
 
     # Start Training
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
@@ -199,7 +233,7 @@ def main(config: BaselineConfig):
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, model, micro_batchloader, loss_fn, optimizer, scheduler, device, config)
+        outputs = train(train_step, model, micro_batchloader, loss_fn, optimizer, scheduler, device, config.train.amp.dtype, config.train.max_norm)
         
         # Compute and log metrics
         train_metrics.update(outputs)
@@ -214,7 +248,7 @@ def main(config: BaselineConfig):
             for eval_step in eval_bar:
                 # Eval step
                 batch = next(val_dataloader)
-                outputs = eval(eval_step, model, batch, device)
+                outputs = eval(eval_step, model, batch, loss_fn, device)
 
                 # Compute and log metrics
                 eval_metrics.update(outputs)
@@ -225,12 +259,17 @@ def main(config: BaselineConfig):
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
-            samples = sample(model, tokenizer, device, config)
+            samples = sample(model, tokenizer, config.sample.prompt, config.sample.max_new_tokens, device)
             logger.log_samples(samples, train_step)
 
         # Checkpoint
         if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
-            logger.log_checkpoint(model, tokenizer, train_step)
+            logger.log_checkpoint(train_step, model, config)
+
+    # Sample after training
+    if config.sample.enable:
+        samples = sample(model, tokenizer, config.sample.prompt, config.sample.max_new_tokens, device)
+        logger.log_samples(samples, train_step)
 
     # Test
     if config.eval.enable:
@@ -239,7 +278,7 @@ def main(config: BaselineConfig):
         test_bar = tqdm(range(1, num_test_steps+1), position=0, leave=True)
         for test_step in test_bar:
             batch = next(test_dataloader)
-            outputs = eval(test_step, model, batch, device)
+            outputs = eval(test_step, model, batch, loss_fn, device)
 
             # Compute and log metrics
             test_metrics.update(outputs)
@@ -250,7 +289,7 @@ def main(config: BaselineConfig):
 
     # Final Checkpoint
     if config.logging.ckpt.enable:
-        logger.log_checkpoint(model, tokenizer, train_step)
+        logger.log_checkpoint(train_step, model, config)
 
     logger.log_message("Finished training!")
     logger.close()

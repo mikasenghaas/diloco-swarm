@@ -1,5 +1,6 @@
 import os
 import math
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -11,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
-from .config import ModelConfig, DataConfig, LoggingConfig, TrainConfig
+from .config import LoggingConfig
 from .logger import CustomLogger
 from .metrics import Metrics
 from .world import World
@@ -54,16 +55,16 @@ def get_dtype(dtype: str) -> torch.dtype:
 def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> CustomLogger:
     return CustomLogger(logging, name, run_id)
 
-def get_model_type(model: ModelConfig) -> ModelType:
-    if "llama" in model.name:
+def get_model_type(model_name: str) -> ModelType:
+    if "llama" in model_name:
         return ModelType.LLAMA
-    elif "gpt" in model.name:
+    elif "gpt" in model_name:
         return ModelType.GPT
     else:
-        raise ValueError(f"Unknown model type: {model.name}")
+        raise ValueError(f"Unknown model type: {model_name}")
 
-def get_model(model: ModelConfig) -> Model:
-    base_model = AutoModelForCausalLM.from_pretrained(model.name, cache_dir=HF_CACHE_DIR)
+def get_model(model_name: str) -> Model:
+    base_model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=HF_CACHE_DIR)
     return Model(base_model)
 
 def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: ModelType) -> ShardedModel:
@@ -75,39 +76,37 @@ def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: Mod
         case _:
             raise ValueError(f"Unknown model type: {model_type}")
 
-def get_tokenizer(model: ModelConfig) -> AutoTokenizer:
-    return AutoTokenizer.from_pretrained(model.name, fast=True, cache_dir=HF_CACHE_DIR)
+def get_tokenizer(model_name: str) -> AutoTokenizer:
+    return AutoTokenizer.from_pretrained(model_name, fast=True, cache_dir=HF_CACHE_DIR)
 
-def get_optimizer(train: TrainConfig, model: AutoModelForCausalLM) -> AdamW:
-    return AdamW(model.parameters(), lr=train.optimizer.lr, weight_decay=train.optimizer.decay, betas=train.optimizer.betas)
+def get_optimizer(model: nn.Module | AutoModelForCausalLM, lr: float, weight_decay: float, betas: Tuple[float, float]) -> AdamW:
+    return AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas)
 
-def get_scheduler(train: TrainConfig, optimizer: AdamW, num_steps: int) -> LambdaLR:
-    if train.scheduler.enable:
-        def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
-            if step < warmup_steps:
-                return step / max(1, warmup_steps)
-            progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
-            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
-            return min_lr_factor + (1 - min_lr_factor) * cosine_decay
-        return LambdaLR(optimizer, lambda step: lr_lambda(step, train.scheduler.warmup_steps, num_steps, train.scheduler.num_cycles, train.scheduler.min_lr_factor), last_epoch=train.scheduler.last_epoch)
+def get_scheduler(optimizer: AdamW, num_steps: int, warmup_steps: int, num_cycles: int, min_lr_factor: float, last_epoch: int, enable: bool) -> LambdaLR:
+    def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
+        return min_lr_factor + (1 - min_lr_factor) * cosine_decay
+    if enable:
+        return LambdaLR(optimizer, lambda step: lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor), last_epoch=last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
 
-def get_dataset(data: DataConfig, split: str | None = None) -> Dataset:
-    datadict = load_dataset(data.path, data.name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
+def get_dataset(path: str, name: str | None = None, split: str | None = None) -> Dataset:
+    datadict = load_dataset(path, name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
     dataset = datadict[split]
     
-    if split == "train" and data.subset_size < 1.0:
-        return dataset.shuffle(seed=42).select(range(int(len(dataset) * data.subset_size)))
     return dataset
 
 def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         batch_input_ids = torch.stack([torch.tensor(item['input_ids']) for item in batch])
+        batch_attention_mask = torch.stack([torch.tensor(item['attention_mask']) for item in batch])
         return {
             "input_ids": batch_input_ids[:, :-1].contiguous(),
             "target_ids": batch_input_ids[:, 1:].contiguous(),
-            # "position_index": torch.arange(seq_len-1, dtype=torch.long).unsqueeze(1).expand(-1, batch_size).contiguous(),
-            # "attn_mask": torch.tril(torch.ones((seq_len-1, seq_len-1), dtype=torch.bool)).T.unsqueeze(0).expand(batch_size, -1, -1).contiguous(),
+            "attention_mask": batch_attention_mask[:, :-1].contiguous(),
             "hidden_states": None
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
@@ -116,9 +115,10 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool
 def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) -> DataLoader:
     """Create a DataLoader for micro-batches from a single large batch."""
     class MicroBatchDataset(Dataset):
-        def __init__(self, input_ids, target_ids):
+        def __init__(self, input_ids, target_ids, attention_mask):
             self.input_ids = input_ids
             self.target_ids = target_ids
+            self.attention_mask = attention_mask
 
         def __len__(self):
             return len(self.input_ids)
@@ -127,13 +127,16 @@ def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) 
             return {
                 'input_ids': self.input_ids[idx],
                 'target_ids': self.target_ids[idx],
+                'attention_mask': self.attention_mask[idx],
             }
 
-    dataset = MicroBatchDataset(batch['input_ids'], batch["target_ids"])
+    dataset = MicroBatchDataset(batch['input_ids'], batch["target_ids"], batch["attention_mask"])
     return DataLoader(dataset, batch_size=micro_batch_size, shuffle=False)
 
-def tokenize(examples: Dict[str, Any], tokenizer: AutoTokenizer, max_length: int) -> Dict[str, Any]:
-    return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=max_length+1)
+def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = None, return_tensors: str | None = "pt") -> Dict[str, Any]:
+    if max_length is None:
+        return tokenizer(sample, return_tensors=return_tensors)
+    return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length+1, return_tensors=return_tensors)
 
 def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
