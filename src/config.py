@@ -13,12 +13,12 @@ class DataConfig(BaseConfig):
 
 class OptimizerConfig(BaseConfig):
     lr: float = 6e-4
-    decay: float = 0.1
+    weight_decay: float = 0.1
     betas: list[float] = [0.9, 0.95]
     
 class SchedulerConfig(BaseConfig):
     enable: bool
-    warmup_steps: int = 100
+    num_warmup_steps: int = 100
     num_cycles: float = 0.5
     min_lr_factor: float = 0.1
     last_epoch: int = -1
@@ -48,12 +48,8 @@ class EvalConfig(BaseConfig):
 class SampleConfig(BaseConfig):
     enable: bool
     every_n_steps: int = -1
-    prompt: str = "Hey, who are you?"
-    num_return_sequences: int = 10
-    top_k: int = 50
-    # top_p : float = 0.95
+    prompt: str = "I am"
     max_new_tokens: int = 50
-    temperature: float = 0.7
 
 class CheckpointingConfig(BaseConfig):
     enable: bool

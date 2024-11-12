@@ -15,14 +15,14 @@ class Model(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, **kwargs):
-        outputs = self.model(**kwargs)
+    def forward(self, **kwargs) -> torch.Tensor:
+        outputs = self.model(input_ids=kwargs["input_ids"])
         return outputs.logits
 
-    def __call__(self, **kwargs):
+    def __call__(self, **kwargs) -> torch.Tensor:
         return self.forward(**kwargs)
     
-    def num_parameters(self):
+    def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
     
 class ShardedModel(nn.Module, ABC):
