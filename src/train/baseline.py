@@ -98,7 +98,7 @@ def eval(step: int, model: GPT2, batch: Dict[str, torch.Tensor], loss_fn: nn.Mod
     model.eval()
 
     # Prepare batch
-    batch = {k: v.to(device) for k, v in batch.items()}
+    batch = {k: v.to(device) for k, v in batch.items() if v is not None}
     with torch.no_grad():
         # Forward
         logits = model.forward(input_ids=batch["input_ids"])
@@ -200,7 +200,7 @@ def main(config: BaselineConfig):
 
     # Set up optimizer
     optimizer = get_optimizer(model, config.train.optimizer)
-    scheduler = get_scheduler(optimizer, config.train.scheduler)
+    scheduler = get_scheduler(optimizer, num_train_steps, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
 
     # Sample before training
