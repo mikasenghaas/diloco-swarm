@@ -54,7 +54,7 @@ class SampleConfig(BaseConfig):
     prompt: str = "I am"
     max_new_tokens: int = 20
     temperature : float = 1.0
-    top_k : int | None = None
+    top_k : int | None = 20
 
 class CheckpointingConfig(BaseConfig):
     enable: bool = False
