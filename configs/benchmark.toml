@@ -2,32 +2,11 @@
 seq_length = 1024
 
 [train]
-max_steps = 5
-max_epochs = -1
 batch_size = 512
-
-[train.amp]
-
-[train.optimizer]
-
-[train.scheduler]
-enable = false
-
-[sample]
-enable = false
-
-[eval]
-enable = false
-every_n_steps = -1
-
-[logging.console]
-enable = true
+max_steps = 5
 
 [logging.wandb]
 enable = true
 
 [logging.file]
 enable = true
-
-[logging.ckpt]
-enable = false

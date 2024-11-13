@@ -1,9 +1,7 @@
 #!/bin/bash
 
 set -e
-GROUP="verify/baseline/overfit"
-
-# Single-GPU experiments to overfit a single sentence
+GROUP="baseline/verify/overfit"
 
 python src/train/baseline.py @configs/debug.toml \
     --model @configs/model/gpt2-small.toml \

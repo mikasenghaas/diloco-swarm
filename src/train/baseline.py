@@ -30,9 +30,9 @@ class BaselineConfig(BaseConfig):
     model: ModelConfig
     data: DataConfig
     train: TrainConfig
-    eval: EvalConfig
-    sample: SampleConfig
-    logging: LoggingConfig
+    eval: EvalConfig = EvalConfig()
+    sample: SampleConfig = SampleConfig()
+    logging: LoggingConfig = LoggingConfig()
 
 def train(step: int, model: GPT2, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, config: TrainConfig, device: torch.device) -> Outputs:
     # Prepare model
@@ -169,9 +169,10 @@ def main(config: BaselineConfig):
     logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
-    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, config.data.seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, config.data.seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, config.data.seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    seq_length = config.data.seq_length
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders

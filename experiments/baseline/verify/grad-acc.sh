@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -e
-GROUP="verify/baseline/grad-acc"
+GROUP="baseline/verify/grad-acc"
 
 for MICRO_BATCH_SIZE in 1 32 64
 do

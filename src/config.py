@@ -31,9 +31,9 @@ class AmpConfig(BaseConfig):
 
 class TrainConfig(BaseConfig):
     max_steps: int
-    max_epochs: int
     micro_batch_size: int
     batch_size: int 
+    max_epochs: int = -1
     seed: int = 42
     max_norm: float = 1.0
 
@@ -87,11 +87,11 @@ if __name__ == "__main__":
     import yaml
 
     class TestConfig(BaseConfig):
-        model: ModelConfig = ModelConfig()
-        data: DataConfig = DataConfig()
-        train: TrainConfig = TrainConfig()
-        eval: EvalConfig = EvalConfig()
-        logging: LoggingConfig = LoggingConfig()
+        model: ModelConfig
+        data: DataConfig
+        train: TrainConfig
+        eval: EvalConfig
+        logging: LoggingConfig
 
     config = TestConfig(**parse_argv())
     print(yaml.dump(config.model_dump(), sort_keys=False))
