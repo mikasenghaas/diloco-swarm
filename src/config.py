@@ -3,6 +3,9 @@ from pydantic_config import BaseConfig, parse_argv
 
 class ModelConfig(BaseConfig):
     name: str
+    dim: int
+    n_layers: int
+    n_heads: int
 
 class DataConfig(BaseConfig):
     path: str
