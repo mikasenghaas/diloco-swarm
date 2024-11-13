@@ -14,15 +14,16 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import GPT2Tokenizer
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.model import Model
 from src.logger import Level
 from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
 from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
+from src.model import GPT2
+from src.config import TrainConfig, SampleConfig
 from pydantic_config import BaseConfig, parse_argv
 
 class BaselineConfig(BaseConfig):
@@ -33,7 +34,7 @@ class BaselineConfig(BaseConfig):
     sample: SampleConfig
     logging: LoggingConfig
 
-def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, dtype: str, max_norm: float) -> Outputs:
+def train(step: int, model: GPT2, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, config: TrainConfig, device: torch.device) -> Outputs:
     # Prepare model
     start = time.time()
     model.to(device)
@@ -48,9 +49,9 @@ def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module,
     grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
-        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(dtype)):
+        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)):
             # Forward
-            logits = model(**micro_batch)
+            logits = model.forward(input_ids=micro_batch["input_ids"])
 
             # Reshape logits and targets for loss calculation
             mask = micro_batch["attention_mask"]  # [B, L]
@@ -75,7 +76,7 @@ def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module,
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
     # Step optimizer and scheduler
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.max_norm)
     optimizer.step()
     lr = scheduler.get_last_lr()[0]
     scheduler.step()
@@ -90,7 +91,7 @@ def train(step: int, model: Model, batch_loader: DataLoader, loss_fn: nn.Module,
 
     return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
-def eval(step: int, model: Model, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device) -> Outputs:
+def eval(step: int, model: GPT2, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device) -> Outputs:
     # Prepare model
     start = time.time()
     model.to(device)
@@ -100,7 +101,7 @@ def eval(step: int, model: Model, batch: Dict[str, torch.Tensor], loss_fn: nn.Mo
     batch = {k: v.to(device) for k, v in batch.items()}
     with torch.no_grad():
         # Forward
-        logits = model(**batch)
+        logits = model.forward(input_ids=batch["input_ids"])
 
         # Reshape logits and targets for loss calculation
         mask = batch["attention_mask"]  # [B, L]
@@ -124,35 +125,17 @@ def eval(step: int, model: Model, batch: Dict[str, torch.Tensor], loss_fn: nn.Mo
 
     return Outputs(step=step, loss=loss.item(), num_tokens=num_tokens, num_examples=num_examples, time=step_time)
 
-def sample(model: Model, tokenizer: AutoTokenizer, prompt: str, max_new_tokens: int, device: torch.device) -> List[str]:
+def sample(model: GPT2, tokenizer: GPT2Tokenizer, config: SampleConfig, device: torch.device) -> List[str]:
     # Prepare model
     model.to(device)
     model.eval()
 
-    # Prepare input
-    input_ids = tokenize(prompt, tokenizer)["input_ids"].to(device)
-
-    generated_ids = []
-    with torch.no_grad():
-        while len(generated_ids) < max_new_tokens:
-            # Get model predictions
-            outputs = model(input_ids=input_ids)
-            next_token_logits = outputs[:, -1, :]
-            
-            # Sample next token
-            next_token = torch.argmax(next_token_logits, dim=-1)
-            
-            # Break if EOS token
-            if next_token.item() == tokenizer.eos_token_id:
-                break
-                
-            # Append to generated sequence
-            generated_ids.append(next_token.item())
-            input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+    # Prepare input and generate output
+    input_ids = tokenize(config.prompt, tokenizer)["input_ids"].to(device).repeat(config.num_samples, 1)
+    all_generated_ids = model.generate(input_ids, **config.model_dump(), eos_token_id=tokenizer.eos_token_id)
 
     # Decode the generated text
-    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    return [f"{prompt} {generated_text}".strip()]
+    return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in all_generated_ids]
     
 def main(config: BaselineConfig):
     # Set precision and seed
@@ -171,25 +154,24 @@ def main(config: BaselineConfig):
     logger.log_message(f"Using device: {device}")
 
     # Load model
-    model = get_model(config.model.name)
-    logger.log_message(f"Loaded model '{config.model.name}' ({format_int(model.num_parameters(), 2)} parameters)")
+    model = get_model(config.model)
+    logger.log_message(f"Loaded GPT-2 ({format_int(model.num_parameters(), 2)} parameters)")
 
     # Load tokenizer
-    tokenizer = get_tokenizer(config.model.name)
+    tokenizer = get_tokenizer()
     tokenizer.pad_token = tokenizer.eos_token
-    logger.log_message(f"Loaded tokenizer '{config.model.name}' ({format_int(len(tokenizer), 0)} vocab size)")
+    logger.log_message(f"Loaded GPT-2 tokenizer ({format_int(len(tokenizer), 0)} vocab size)")
 
     # Load and split dataset
-    train_data = get_dataset(config.data.path, config.data.name, split="train")
-    val_data = get_dataset(config.data.path, config.data.name, split="validation")
-    test_data = get_dataset(config.data.path, config.data.name, split="test")
+    train_data = get_dataset(config.data, split="train")
+    val_data = get_dataset(config.data, split="validation")
+    test_data = get_dataset(config.data, split="test")
     logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
-    seq_length = config.data.seq_length
-    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, config.data.seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, config.data.seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, config.data.seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders
@@ -216,14 +198,14 @@ def main(config: BaselineConfig):
     assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
 
     # Set up optimizer
-    optimizer = get_optimizer(model, config.train.optimizer.lr, config.train.optimizer.weight_decay, config.train.optimizer.betas)
-    scheduler = get_scheduler(optimizer, num_train_steps, config.train.scheduler.num_warmup_steps, config.train.scheduler.num_cycles, config.train.scheduler.min_lr_factor, config.train.scheduler.last_epoch, config.train.scheduler.enable)
+    optimizer = get_optimizer(model, config.train.optimizer)
+    scheduler = get_scheduler(optimizer, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
 
     # Sample before training
     if config.sample.enable:
-        samples = sample(model, tokenizer, config.sample.prompt, config.sample.max_new_tokens, device)
-        logger.log_samples(samples, 0)
+        samples = sample(model, tokenizer, config.sample, device)
+        logger.log_samples(0, samples)
 
     # Start Training
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
@@ -233,7 +215,7 @@ def main(config: BaselineConfig):
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, model, micro_batchloader, loss_fn, optimizer, scheduler, device, config.train.amp.dtype, config.train.max_norm)
+        outputs = train(train_step, model, micro_batchloader, loss_fn, optimizer, scheduler, config.train, device)
         
         # Compute and log metrics
         train_metrics.update(outputs)
@@ -259,17 +241,17 @@ def main(config: BaselineConfig):
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
-            samples = sample(model, tokenizer, config.sample.prompt, config.sample.max_new_tokens, device)
-            logger.log_samples(samples, train_step)
+            samples = sample(model, tokenizer, config.sample, device)
+            logger.log_samples(train_step, samples)
 
         # Checkpoint
         if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
-            logger.log_checkpoint(train_step, model, config)
+            logger.log_checkpoint(train_step, model)
 
     # Sample after training
     if config.sample.enable:
-        samples = sample(model, tokenizer, config.sample.prompt, config.sample.max_new_tokens, device)
-        logger.log_samples(samples, train_step)
+        samples = sample(model, tokenizer, config.sample, device)
+        logger.log_samples(train_step, samples)
 
     # Test
     if config.eval.enable:
@@ -289,7 +271,7 @@ def main(config: BaselineConfig):
 
     # Final Checkpoint
     if config.logging.ckpt.enable:
-        logger.log_checkpoint(train_step, model, config)
+        logger.log_checkpoint(train_step, model)
 
     logger.log_message("Finished training!")
     logger.close()

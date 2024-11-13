@@ -10,8 +10,9 @@ from transformers import AutoTokenizer
 from pydantic_config import BaseConfig
 import wandb
 
-from .config import LoggingConfig
-from .ckpt import Checkpoint
+from src.config import LoggingConfig
+from src.ckpt import Checkpoint
+from src.model import GPT2
 
 class Level(Enum):
     DEBUG = logging.DEBUG
@@ -90,16 +91,11 @@ class CustomLogger:
         if self.wandb_run:
             wandb.log(metrics, step=step)
 
-    def log_checkpoint(self, step: int, model: nn.Module, config: BaseConfig, level: Level = Level.INFO) -> None:
-        checkpoint_dir = self.checkpoint.save(step, model, config)
+    def log_checkpoint(self, step: int, model: GPT2, level: Level = Level.INFO) -> None:
+        checkpoint_dir = self.checkpoint.save(step, model)
         self.log_message(f"Saved model checkpoint at step {step}", level=level)
 
-        if self.wandb_run:
-            artifact = wandb.Artifact(name=f"model-{step}", type="model")
-            artifact.add_dir(checkpoint_dir)
-            wandb.log_artifact(artifact)
-
-    def log_samples(self, samples: List[str], step: int, level: Level = Level.INFO) -> None:
+    def log_samples(self, step: int, samples: List[str], level: Level = Level.INFO) -> None:
         for i, sample in enumerate(samples):
             self.log_message(f"Sample {i+1}: {sample}", level=level)
 
@@ -107,11 +103,6 @@ class CustomLogger:
         with open(sample_path, "w") as f:
             for sample in samples:
                 f.write(sample + "\n")
-
-        if self.wandb_run:
-            artifact = wandb.Artifact(name=f"samples-{step}", type="samples")
-            artifact.add_file(sample_path)
-            wandb.log_artifact(artifact)
 
     def close(self) -> None:
         if self.wandb_run:
