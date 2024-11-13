@@ -1,0 +1,3 @@
+n_layer = 24
+n_head = 16
+n_embd = 1024

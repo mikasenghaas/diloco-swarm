@@ -12,11 +12,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
-from .config import LoggingConfig
-from .logger import CustomLogger
-from .metrics import Metrics
-from .world import World
-from .model import Model, ShardedModel, ShardedLlamaModel, ShardedGPTModel, ModelType
+from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, SchedulerConfig
+from src.logger import CustomLogger
+from src.metrics import Metrics
+from src.world import World
+from src.model import GPT2, GPT2Config
 
 from typing import Optional, List, Dict, Tuple, Any
     
@@ -55,49 +55,40 @@ def get_dtype(dtype: str) -> torch.dtype:
 def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> CustomLogger:
     return CustomLogger(logging, name, run_id)
 
-def get_model_type(model_name: str) -> ModelType:
-    if "llama" in model_name:
-        return ModelType.LLAMA
-    elif "gpt" in model_name:
-        return ModelType.GPT
-    else:
-        raise ValueError(f"Unknown model type: {model_name}")
+def get_model(model_config: ModelConfig) -> GPT2:
+    return GPT2(GPT2Config(**model_config.dict()))
 
-def get_model(model_name: str) -> Model:
-    base_model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=HF_CACHE_DIR)
-    return Model(base_model)
+# def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: ModelType) -> ShardedModel:
+#     match model_type:
+#         case ModelType.LLAMA:
+#             return ShardedLlamaModel(model, world)
+#         case ModelType.GPT:
+#             return ShardedGPTModel(model, world)
+#         case _:
+#             raise ValueError(f"Unknown model type: {model_type}")
 
-def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: ModelType) -> ShardedModel:
-    match model_type:
-        case ModelType.LLAMA:
-            return ShardedLlamaModel(model, world)
-        case ModelType.GPT:
-            return ShardedGPTModel(model, world)
-        case _:
-            raise ValueError(f"Unknown model type: {model_type}")
+def get_tokenizer() -> AutoTokenizer:
+    return AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=HF_CACHE_DIR)
 
-def get_tokenizer(model_name: str) -> AutoTokenizer:
-    return AutoTokenizer.from_pretrained(model_name, fast=True, cache_dir=HF_CACHE_DIR)
+def get_optimizer(model: nn.Module | AutoModelForCausalLM, optimizer_config: OptimizerConfig) -> AdamW:
+    return AdamW(model.parameters(), lr=optimizer_config.lr, weight_decay=optimizer_config.weight_decay, betas=optimizer_config.betas)
 
-def get_optimizer(model: nn.Module | AutoModelForCausalLM, lr: float, weight_decay: float, betas: Tuple[float, float]) -> AdamW:
-    return AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas)
-
-def get_scheduler(optimizer: AdamW, num_steps: int, warmup_steps: int, num_cycles: int, min_lr_factor: float, last_epoch: int, enable: bool) -> LambdaLR:
+def get_scheduler(optimizer: AdamW, scheduler_config: SchedulerConfig) -> LambdaLR:
     def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
         progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
         cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
         return min_lr_factor + (1 - min_lr_factor) * cosine_decay
-    if enable:
-        return LambdaLR(optimizer, lambda step: lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor), last_epoch=last_epoch)
+    if scheduler_config.enable:
+        return LambdaLR(optimizer, lambda step: lr_lambda(step, scheduler_config.num_warmup_steps, scheduler_config.num_steps, scheduler_config.num_cycles, scheduler_config.min_lr_factor), last_epoch=scheduler_config.last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
 
-def get_dataset(path: str, name: str | None = None, split: str | None = None) -> Dataset:
-    datadict = load_dataset(path, name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
-    dataset = datadict[split]
-    
-    return dataset
+def get_dataset(data_config: DataConfig, split: str | None = None) -> Dataset:
+    datadict = load_dataset(data_config.path, data_config.name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
+    if split is None:
+        return datadict
+    return datadict[split]
 
 def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
