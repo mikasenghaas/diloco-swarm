@@ -3,31 +3,5 @@ seq_length = 128
 
 [train]
 max_steps = 10
-max_epochs = -1
-micro_batch_size = 1
 batch_size = 32
-
-[train.amp]
-
-[train.optimizer]
-
-[train.scheduler]
-enable = false
-
-[eval]
-enable = false
-
-[sample]
-enable = false
-
-[logging.console]
-enable = true
-
-[logging.file]
-enable = true
-
-[logging.ckpt]
-enable = false
-
-[logging.wandb]
-enable = false
+micro_batch_size = 1

@@ -1,9 +1,7 @@
 #!/bin/bash
 
 set -e
-GROUP="verify/baseline/ckpt"
-
-# Single-GPU overfit experiments to verify checkpointing
+GROUP="baseline/verify/ckpt"
 
 python src/train/baseline.py @configs/debug.toml \
     --model @configs/model/gpt2-small.toml \
