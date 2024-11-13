@@ -5,3 +5,7 @@ seq_length = 128
 max_steps = 10
 batch_size = 32
 micro_batch_size = 1
+
+[eval]
+enable = true
+every_n_steps = 5
