@@ -1,7 +1,7 @@
 """
-Single-GPU LLM pre-training.
+Single-GPU LLM Pre-Training.
 
-python src/train/baseline.py @configs/debug.toml --model @configs/model/llama2-9m.toml --data @configs/data/wikitext.toml
+python src/train/baseline.py @configs/debug.toml --model @configs/model/gpt2-small.toml --data @configs/data/wikitext.toml
 """
 import autorootcwd
 
@@ -54,14 +54,14 @@ def train(step: int, model: GPT2, batch_loader: DataLoader, loss_fn: nn.Module, 
             logits = model.forward(input_ids=micro_batch["input_ids"])
 
             # Reshape logits and targets for loss calculation
-            mask = micro_batch["attention_mask"]  # [B, L]
-            logits_flat = logits.view(-1, logits.size(-1))  # [B*L, V]
-            targets_flat = micro_batch["target_ids"].view(-1)  # [B*L]
+            mask = micro_batch["attention_mask"] # (B, L)
+            logits_flat = logits.view(-1, logits.size(-1))  # (B*L, V)
+            targets_flat = micro_batch["target_ids"].view(-1)  # (B*L)
             
             # Apply mask by filtering out padded positions
-            mask_flat = mask.view(-1)  # [B*L]
-            logits_filtered = logits_flat[mask_flat.bool()]  # [(B*L)', V]
-            targets_filtered = targets_flat[mask_flat.bool()]  # [(B*L)']
+            mask_flat = mask.view(-1)  # (B*L)
+            logits_filtered = logits_flat[mask_flat.bool()]  # ((B*L)', V)
+            targets_filtered = targets_flat[mask_flat.bool()]  # ((B*L)')
             
             # Calculate loss only on non-padded positions
             loss = loss_fn(logits_filtered, targets_filtered)

@@ -16,7 +16,7 @@ from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, 
 from src.logger import CustomLogger
 from src.metrics import Metrics
 from src.world import World
-from src.model import GPT2, GPT2Config
+from src.model import GPT2, ShardedGPT2, GPT2Config
 
 from typing import Optional, List, Dict, Tuple, Any
     
@@ -58,14 +58,8 @@ def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optio
 def get_model(model_config: ModelConfig) -> GPT2:
     return GPT2(GPT2Config(**model_config.dict()))
 
-# def get_sharded_model(model: AutoModelForCausalLM, world: World, model_type: ModelType) -> ShardedModel:
-#     match model_type:
-#         case ModelType.LLAMA:
-#             return ShardedLlamaModel(model, world)
-#         case ModelType.GPT:
-#             return ShardedGPTModel(model, world)
-#         case _:
-#             raise ValueError(f"Unknown model type: {model_type}")
+def get_sharded_model(model: GPT2, world: World) -> ShardedGPT2:
+    return ShardedGPT2(model, world)
 
 def get_tokenizer() -> AutoTokenizer:
     return AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=HF_CACHE_DIR)

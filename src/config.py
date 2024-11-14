@@ -5,6 +5,7 @@ class ModelConfig(BaseConfig):
     n_layer: int
     n_head: int
     n_embd: int
+    parameter_sharing: bool = False # Share weights for embeddings and LM head
 
 class DataConfig(BaseConfig):
     path: str

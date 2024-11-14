@@ -10,6 +10,8 @@ from torch.nn import functional as F
 
 from huggingface_hub import PyTorchModelHubMixin
 
+from src.world import World
+
 @dataclass
 class GPT2Config():
     block_size: int = 1024
@@ -19,6 +21,7 @@ class GPT2Config():
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # (Like GPT-2, but better without)
+    parameter_sharing: bool = True
 
 class LayerNorm(nn.Module):
     def __init__(self, dim: int, bias: bool):
@@ -115,17 +118,12 @@ class GPT2(nn.Module, PyTorchModelHubMixin):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight
+        if config.parameter_sharing:
+            self.transformer.wte.weight = self.lm_head.weight
         self.apply(self.init_weights)
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
-
-    def num_parameters(self, non_embedding: bool = True) -> int:
-        num_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            num_params -= self.transformer.wpe.weight.numel()
-        return num_params
 
     def init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):
@@ -135,24 +133,31 @@ class GPT2(nn.Module, PyTorchModelHubMixin):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
         device = input_ids.device
-
-        # Position embeddings
         pos = torch.arange(0, input_ids.size(1), dtype=torch.long, device=device)
         pos_emb = self.transformer.wpe(pos)
-
-        # Token embeddings
         tok_emb = self.transformer.wte(input_ids)
+        return self.transformer.drop(tok_emb + pos_emb)
 
-        # Forward the Transformer model itself
-        x = self.transformer.drop(tok_emb + pos_emb)
+    def forward_layers(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.transformer.h:
             x = block(x)
-        x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+        return x
 
-        return logits
+    def forward_logits(self, x: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(self.transformer.ln_f(x))
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        x = self.encode_tokens(input_ids)
+        x = self.forward_layers(x)
+        return self.forward_logits(x)
+
+    def num_parameters(self, exclude_positional: bool = True) -> int:
+        num_params = sum(p.numel() if hasattr(p, 'numel') else 0 for p in self.parameters())
+        if exclude_positional and hasattr(self.transformer.wpe, 'weight'):
+            num_params -= self.transformer.wpe.weight.numel()
+        return num_params
 
     @classmethod
     def from_hf(cls, hf_model, override_args=None):
@@ -206,7 +211,7 @@ class GPT2(nn.Module, PyTorchModelHubMixin):
         return model
 
     @torch.no_grad()
-    def generate(self, input_ids: torch.Tensor, num_samples: int, max_new_tokens: int, temperature: float = 1.0, top_k: Optional[int] = None, eos_token_id: Optional[int] = None, **kwargs):
+    def generate(self, input_ids: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: Optional[int] = None, eos_token_id: Optional[int] = None, **kwargs):
         for _ in range(max_new_tokens):
             idx_cond = input_ids if input_ids.size(1) <= self.config.block_size else input_ids[:, -self.config.block_size:]
             logits = self(idx_cond)
@@ -221,3 +226,45 @@ class GPT2(nn.Module, PyTorchModelHubMixin):
                 break
 
         return input_ids
+
+class ShardedGPT2(GPT2):
+    def __init__(self, model: GPT2, world: World):
+        # Copy over important attributes from the model instance
+        self.__dict__.update(model.__dict__)
+        
+        # Setup sharded model
+        self.world = world
+        self.transformer = nn.ModuleDict(dict(
+            wte = model.transformer.wte if self.world.is_first_stage else nn.Identity(),
+            wpe = model.transformer.wpe if self.world.is_first_stage else nn.Identity(),
+            drop = model.transformer.drop if self.world.is_first_stage else nn.Identity(),
+            h = nn.ModuleList([model.transformer.h[i] for i in self.distribute_layers(model.config.n_layer)]),
+            ln_f = model.transformer.ln_f if self.world.is_last_stage else nn.Identity(),
+        ))
+        self.lm_head = model.lm_head if self.world.is_last_stage else nn.Identity()
+        
+        # Delete original model
+        del model
+
+    def distribute_layers(self, num_layers):
+        layers_per_gpu = [num_layers // self.world.world_size + (1 if i < num_layers % self.world.world_size else 0) for i in range(self.world.world_size)]
+        start_layer = sum(layers_per_gpu[:self.world.local_rank])
+        return list(range(start_layer, start_layer + layers_per_gpu[self.world.local_rank]))
+
+    def forward(self, input_ids: Optional[torch.Tensor] = None, hidden_states: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert input_ids is not None or hidden_states is not None
+        if self.world.is_first_stage:
+            x = self.encode_tokens(input_ids)
+        else:
+            x = hidden_states
+        x = self.forward_layers(x)
+        if self.world.is_last_stage:
+            x = self.forward_logits(x)
+        return x
+
+    def backward(self, input_tensor, output_tensor, output_tensor_grad):
+        if input_tensor is not None: input_tensor.retain_grad()
+        if output_tensor_grad is None:
+            output_tensor_grad = torch.ones_like(output_tensor, memory_format=torch.preserve_format)
+        torch.autograd.backward(output_tensor, grad_tensors=output_tensor_grad, retain_graph=False, create_graph=False)
+        return input_tensor.grad if input_tensor is not None else None

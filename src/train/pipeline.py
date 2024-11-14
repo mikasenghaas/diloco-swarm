@@ -1,10 +1,7 @@
 """
 Pipeline Parallel LLM Pre-Training.
 
-Run with:
-```
-#VERBOSE=1 torchrun --nproc_per_node 2 src/train/pipeline.py @configs/debug.toml --model @configs/model/llama2-9m.toml --data @configs/data/wikitext.toml
-```
+torchrun --nproc_per_node 2 src/train/pipeline.py @configs/debug.toml --model @configs/model/gpt2-small.toml --data @configs/data/wikitext.toml --logging.console.enable false --logging.file.enable true
 """
 import autorootcwd
 
@@ -16,6 +13,7 @@ from datetime import datetime
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
@@ -23,12 +21,12 @@ from torch.utils.data import DataLoader
 from datasets import disable_progress_bar
 from transformers import AutoTokenizer
 
+from src.comm import Comm
+from src.world import World
 from src.logger import Level
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
-from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_model_type, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description
-from src.world import World
+from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Examples, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
-from src.comm import Comm
 from pydantic_config import BaseConfig, parse_argv
 
 # Global logger
@@ -38,49 +36,65 @@ class PipelineConfig(BaseConfig):
     model: ModelConfig
     data: DataConfig
     train: TrainConfig
-    eval: EvalConfig
-    sample: SampleConfig
-    logging: LoggingConfig
+    eval: EvalConfig = EvalConfig()
+    sample: SampleConfig = SampleConfig()
+    logging: LoggingConfig = LoggingConfig()
 
-def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, device: torch.device, world: World, comm: Comm, max_norm: float) -> Outputs:
+def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, config: TrainConfig, device: torch.device) -> Outputs:
+    global logger
+    # Prepare model
     start = time.time()
-    sharded_model.train()
     sharded_model.to(device)
-    optimizer.zero_grad()
+    sharded_model.train()
     
-    # Initialization
+    # Prepare statistics
     batch_loss = 0.0
     batch_tokens, batch_examples = 0, 0
     input_tensors, output_tensors = [], []
 
-    # Forward
+    # Zero-out gradient
+    optimizer.zero_grad()
     grad_accumulation_steps = len(batch_loader)
     for micro_batch_id, micro_batch in enumerate(batch_loader):
+        # Forward
+        input_ids, target_ids = micro_batch["input_ids"].to(device), micro_batch["target_ids"].to(device)
         input_tensor = comm.recv_forward(micro_batch_id)
-        micro_batch["hidden_states"] = input_tensor
-        micro_batch = {k: v.to(device) if v is not None else v for k, v in micro_batch.items()}
-        output_tensor = sharded_model.forward(**micro_batch)
+        input_tensor = input_tensor.to(device) if input_tensor is not None else None
+        output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=input_tensor)
         comm.send_forward(output_tensor, micro_batch_id)
 
         if world.is_last_stage:
-            output_tensor = loss_fn(output_tensor.transpose(1, 2), micro_batch["target_ids"].to(device))
-            output_tensor = output_tensor / grad_accumulation_steps
+            # Reshape logits and targets for loss calculation
+            mask = micro_batch["attention_mask"] # (B, L)
+            logits_flat = output_tensor.view(-1, output_tensor.size(-1))  # (B*L, V)
+            targets_flat = target_ids.view(-1)  # (B*L)
+            
+            # Apply mask by filtering out padded positions
+            mask_flat = mask.view(-1)  # (B*L)
+            logits_filtered = logits_flat[mask_flat.bool()]  # ((B*L)', V)
+            targets_filtered = targets_flat[mask_flat.bool()]  # ((B*L)')
+            
+            # Calculate loss only on non-padded positions
+            output_tensor = loss_fn(logits_filtered, targets_filtered)
+            output_tensor /= grad_accumulation_steps # Scale loss
+
+            # Update statistics
             batch_loss += output_tensor.detach().item()
-            batch_examples += micro_batch["input_ids"].shape[0]
-            batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
+            batch_examples += input_ids.shape[0]
+            batch_tokens += input_ids.shape[0] * input_ids.shape[1]
 
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
-    
+
     # Backward
-    for micro_batch_id, micro_batch in enumerate(batch_loader): 
+    for micro_batch_id in range(len(batch_loader)): 
         output_tensor_grad = comm.recv_backward(micro_batch_id)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = sharded_model.backward(input_tensor, output_tensor, output_tensor_grad)
         comm.send_backward(input_tensor_grad, micro_batch_id)
     
     # Optimizer and scheduler step
-    norm = torch.nn.utils.clip_grad_norm_(sharded_model.parameters(), max_norm=max_norm)
+    norm = torch.nn.utils.clip_grad_norm_(sharded_model.parameters(), max_norm=config.max_norm)
     lr = scheduler.get_last_lr()[0]
     optimizer.step()
     scheduler.step()
@@ -93,68 +107,79 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
 
     return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
-def eval(step: int, sharded_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: Comm) -> Outputs:
+def eval(step: int, sharded_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, world: World, comm: Comm, device: torch.device) -> Outputs:
     start = time.time()
     sharded_model.eval()
     batch_loss = 0.0
     batch_tokens, batch_examples = 0, 0
     with torch.no_grad():
+        input_ids, target_ids = batch["input_ids"].to(device), batch["target_ids"].to(device)
         input_tensor = comm.recv_forward(0)
-        batch["hidden_states"] = input_tensor
-        batch = {k: v.to(device) if v is not None else v for k, v in batch.items()}
-        output_tensor = sharded_model.forward(**batch)
+        input_tensor = input_tensor.to(device) if input_tensor is not None else None
+        output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=input_tensor)
         comm.send_forward(output_tensor, 0)
 
         if world.is_last_stage:
-            output_tensor = loss_fn(output_tensor.transpose(1, 2), batch["target_ids"].to(device))
+            output_tensor = loss_fn(output_tensor.transpose(1, 2), target_ids)
             batch_loss += output_tensor.detach().item()
-            batch_examples += batch["input_ids"].shape[0]
-            batch_tokens += batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
+            batch_examples += input_ids.shape[0]
+            batch_tokens += input_ids.shape[0] * input_ids.shape[1]
     
     end = time.time()
     step_time = end - start
 
+    # Synchronize at end of iteration
+    torch.cuda.synchronize()
+    dist.barrier()
+
     return Outputs(step=step, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, time=step_time)
 
-def sample(sharded_model: nn.Module, tokenizer: AutoTokenizer, device: torch.device, world: World, comm: Comm, config: PipelineConfig) -> List[str]:
-    sharded_model.eval()
+def sample(sharded_model: nn.Module, tokenizer: AutoTokenizer, world: World, forward_comm: Comm, backward_comm: Comm, config: SampleConfig, device: torch.device) -> List[str]:
+    # Prepare model
     sharded_model.to(device)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    
-    # Encode input prompt
-    input_tensor = tokenizer(config.sample.prompt, return_tensors="pt").to(device)
-    input_tensor = {k: v.repeat(config.sample.num_return_sequences, 1) for k, v in input_tensor.items()}
-    
-    while True:
-        input_tensor = comm.recv_forward(0)
-        if input_tensor.shape[1] >= config.sample.max_new_tokens: break
-        output_tensor = sharded_model(**input_tensor)
-        comm.send_forward(output_tensor, 0)
+    sharded_model.eval()
+
+    dist.barrier()
+
+    # Prepare input and generate output
+    prompt_length = tokenize(config.prompt, tokenizer)["input_ids"].shape[1]
+    input_ids = tokenize(config.prompt, tokenizer, max_length=config.max_new_tokens)["input_ids"].to(device).repeat(config.num_samples, 1)
+    for generated_id in range(prompt_length, config.max_new_tokens):
+        logger.log_message("generated id")
+        # Forward
+        if world.is_first_stage and generated_id != prompt_length:
+            logger.log_message("recv new input_ids")
+            input_ids = backward_comm.recv_from(world.last_stage)
+            logger.log_message("recvd new input_ids")
+            input_ids = input_ids.to(device, dtype=torch.long)
+        else:
+            logger.log_message("recv hidden_states")
+            hidden_states = forward_comm.recv_forward()
+            logger.log_message("recvd hidden_states")
+            hidden_states = hidden_states.to(device) if hidden_states is not None else None
+        output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=hidden_states)
+        logger.log_message("sent output_tensor")
+        forward_comm.send_forward(output_tensor)
 
         if world.is_last_stage:
-            last_logits = output_tensor[:, -1, :]
+            logits = output_tensor[:, generated_id, :] / config.temperature
+            if config.top_k is not None:
+                v, _ = torch.topk(logits, min(config.top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            input_ids[:, generated_id] = idx_next.squeeze()
+            # if tokenizer.eos_token_id is not None and (idx_next == tokenizer.eos_token_id).all():
+                #break
+            backward_comm.send_to(input_ids, world.first_stage)
+            logger.log_message("sent input_ids")
 
-            # Apply temperature scaling
-            last_scaled_logits = last_logits / config.sample.temperature
-            
-            # Apply top-k sampling
-            top_k_logits, top_k_indices = torch.topk(last_scaled_logits, k=config.sample.top_k, dim=-1)
-            probs = torch.softmax(top_k_logits, dim=-1)
-            next_token_idx = torch.multinomial(probs, num_samples=1)
-            next_token = top_k_indices.gather(-1, next_token_idx).squeeze(-1)
-            next_token = torch.where(unfinished, next_token, tokenizer.pad_token_id)
-            
-            # Update which sequences are finished
-            unfinished = unfinished & (next_token != tokenizer.eos_token_id)
-            
-            # Append to input sequence
-            input_tensor["input_ids"] = torch.cat((input_tensor["input_ids"], next_token.unsqueeze(1)), dim=1)
-            input_tensor["attention_mask"] = torch.cat((input_tensor["attention_mask"], unfinished.unsqueeze(1)), dim=1)
+    # Synchronize at end of iteration
+    logger.log_message("sync")
+    torch.cuda.synchronize()
+    dist.barrier()
 
-            # Send updated input tensor to first stage
-            comm.send_forward(input_tensor, 0)
-
-    return tokenizer.batch_decode(input_tensor["input_ids"], skip_special_tokens=True)
+    return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids]
 
 def main(config: PipelineConfig):
     global logger
@@ -184,22 +209,18 @@ def main(config: PipelineConfig):
     torch.set_float32_matmul_precision(config.train.amp.precision)
     logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}")
 
-    # Get model
-    model = get_model(config.model, device)
-    logger.log_message(f"Loaded model '{config.model.name}' ({format_int(model.num_parameters(), 2)} parameters)")
+    # Load model
+    model = get_model(config.model)
+    logger.log_message(f"Loaded GPT-2 ({format_int(model.num_parameters(), 2)} parameters)")
 
     # Get sharded model
-    sharded_model = get_sharded_model(model, world, get_model_type(config.model))
-    logger.log_message(f"Sharded model '{config.model.name}' ({format_int(sharded_model.num_parameters(), 2)} parameters)")
+    sharded_model = get_sharded_model(model, world)
+    logger.log_message(f"Sharded model ({format_int(sharded_model.num_parameters(), 2)} parameters)")
 
     # Load tokenizer
-    tokenizer = get_tokenizer(config.model)
+    tokenizer = get_tokenizer()
     tokenizer.pad_token = tokenizer.eos_token
-    logger.log_message(f"Loaded tokenizer '{config.model.name}' ({format_int(len(tokenizer), 0)} vocab size)")
-
-    samples = sample(sharded_model, tokenizer, device, world, comm, config)
-    logger.log_samples(samples, 0)
-    exit(0)
+    logger.log_message(f"Loaded GPT-2 tokenizer ({format_int(len(tokenizer), 0)} vocab size)")
 
     # Load and split dataset
     train_data = get_dataset(config.data, split="train")
@@ -209,9 +230,9 @@ def main(config: PipelineConfig):
 
     # Prepare dataset
     seq_length = config.data.seq_length
-    train_data = train_data.map(lambda examples: tokenize(examples, tokenizer, seq_length), batched=True, num_proc=os.cpu_count() // world_size, remove_columns=train_data.column_names)
-    val_data = val_data.map(lambda examples: tokenize(examples, tokenizer, seq_length), batched=True, num_proc=os.cpu_count() // world_size, remove_columns=val_data.column_names)
-    test_data = test_data.map(lambda examples: tokenize(examples, tokenizer, seq_length), batched=True, num_proc=os.cpu_count() // world_size, remove_columns=test_data.column_names)
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders
@@ -238,16 +259,23 @@ def main(config: PipelineConfig):
     assert config.train.batch_size % grad_accumulation_steps == 0, "Batch size must be divisible by grad accumulation steps"
 
     # Set up optimizer
-    optimizer = get_optimizer(config.train, sharded_model)
-    scheduler = get_scheduler(config.train, optimizer, num_train_steps)
+    optimizer = get_optimizer(sharded_model, config.train.optimizer)
+    scheduler = get_scheduler(optimizer, num_train_steps, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
 
     # Get communication
-    B, L, H = config.train.micro_batch_size, config.data.seq_length, model.config.hidden_size
+    B, L, H = config.train.micro_batch_size, config.data.seq_length, model.config.n_embd
     comm = Comm(world, (B, L, H), torch.float32)
     logger.log_message(f"Initialized communication: {comm}")
 
-    # Training loop
+    if config.sample.enable and False:
+        forward_comm = Comm(world, (config.sample.num_samples, config.sample.max_new_tokens, H), torch.float32)
+        backward_comm = Comm(world, (config.sample.num_samples, config.sample.max_new_tokens), torch.float32)
+        samples = sample(sharded_model, tokenizer, world, forward_comm, backward_comm, config.sample, device)
+        if world.is_last_stage:
+            logger.log_samples(0, samples)
+
+    # Start training
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Loss(), Perplexity(), Throughput(), Norm(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
     train_range = range(1, num_train_steps+1)
@@ -256,7 +284,7 @@ def main(config: PipelineConfig):
         # Train step
         batch = next(train_dataloader)
         micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
-        outputs = train(train_step, sharded_model, micro_batchloader, loss_fn, optimizer, scheduler, device, world, comm, max_norm=config.train.max_norm)
+        outputs = train(train_step, sharded_model, micro_batchloader, loss_fn, optimizer, scheduler, world, comm, config.train, device)
 
         # Compute and log metrics (only last stage)
         if world.is_last_stage:
@@ -274,7 +302,7 @@ def main(config: PipelineConfig):
             for eval_step in eval_range:
                 # Eval step
                 batch = next(val_dataloader)
-                outputs = eval(eval_step, sharded_model, batch, loss_fn, device, world, comm)
+                outputs = eval(eval_step, sharded_model, batch, loss_fn, world, comm, device)
 
                 # Compute log metrics
                 if world.is_last_stage:
@@ -289,8 +317,18 @@ def main(config: PipelineConfig):
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
-            samples = sample(sharded_model, tokenizer, device, config)
-            logger.log_samples(samples, train_step)
+            forward_comm = Comm(world, (config.sample.num_samples, config.sample.max_new_tokens, H), torch.float32)
+            backward_comm = Comm(world, (config.sample.num_samples, config.sample.max_new_tokens), torch.float32)
+            samples = sample(sharded_model, tokenizer, world, forward_comm, backward_comm, config.sample, device)
+            if world.is_last_stage:
+                logger.log_samples(train_step, samples)
+
+    if config.sample.enable:
+        forward_comm = Comm(world, (config.sample.num_samples, config.sample.max_new_tokens, H), torch.float32)
+        backward_comm = Comm(world, (config.sample.num_samples, config.sample.max_new_tokens), torch.float32)
+        samples = sample(sharded_model, tokenizer, world, forward_comm, backward_comm, config.sample, device)
+        if world.is_last_stage:
+            logger.log_samples(train_step, samples)
 
     # Destroy process group
     if world.world_size > 1:
