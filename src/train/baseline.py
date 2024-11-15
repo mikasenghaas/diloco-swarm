@@ -18,6 +18,7 @@ from transformers import GPT2Tokenizer
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
+from src.ckpt import Checkpoint
 from src.logger import Level
 from src.world import World
 from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
@@ -158,6 +159,11 @@ def main(config: BaselineConfig):
     world = World(local_rank=0, world_size=1, device=device)
     logger.log_world(world)
 
+    if config.logging.ckpt.enable:
+        ckpt = Checkpoint(logger.checkpoint_dir)
+        ckpt.setup(world)
+        logger.log_message(f"Checkpoint directory: {ckpt.base_dir}")
+
     # Load model
     model = get_model(config.model)
     logger.log_message(f"Loaded GPT-2 ({format_int(model.num_parameters(), 2)} parameters)")
@@ -252,7 +258,8 @@ def main(config: BaselineConfig):
 
         # Checkpoint
         if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
-            logger.log_checkpoint(train_step, model)
+            ckpt_dir = ckpt.save(train_step, model)
+            logger.log_message(f"Saved model checkpoint at {ckpt_dir}")
 
     # Sample after training
     if config.sample.enable:
@@ -277,7 +284,8 @@ def main(config: BaselineConfig):
 
     # Final Checkpoint
     if config.logging.ckpt.enable:
-        logger.log_checkpoint(train_step, model)
+        ckpt_dir = ckpt.save(train_step, model)
+        logger.log_message(f"Saved model checkpoint at {ckpt_dir}")
 
     logger.log_message("Finished training!")
     logger.close()

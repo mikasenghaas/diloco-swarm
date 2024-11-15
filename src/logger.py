@@ -9,9 +9,7 @@ from pydantic_config import BaseConfig
 import wandb
 
 from src.config import LoggingConfig
-from src.ckpt import Checkpoint
 from src.world import World
-from src.model import GPT2
 
 class Level(Enum):
     DEBUG = logging.DEBUG
@@ -31,8 +29,6 @@ class CustomLogger:
         self.name = name if name else "master"
         self.run_id = run_id if run_id else datetime.now().strftime("%Y%m%d_%H%M%S")
         self.setup()
-
-        self.checkpoint = Checkpoint(self.checkpoint_dir)
 
     def setup(self):
         # Create log directory
@@ -95,10 +91,6 @@ class CustomLogger:
         self.log_message(metrics, level=level)
         if self.wandb_run:
             wandb.log(metrics, step=step)
-
-    def log_checkpoint(self, step: int, model: GPT2, level: Level = Level.INFO) -> None:
-        checkpoint_dir = self.checkpoint.save(step, model)
-        self.log_message(f"Saved model checkpoint at step {step}", level=level)
 
     def log_samples(self, step: int, samples: List[str], level: Level = Level.INFO) -> None:
         for i, sample in enumerate(samples):

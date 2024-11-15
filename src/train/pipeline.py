@@ -24,6 +24,7 @@ from transformers import AutoTokenizer
 from src.comm import Comm
 from src.world import World
 from src.logger import Level
+from src.ckpt import Checkpoint
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Examples, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
@@ -185,6 +186,12 @@ def main(config: PipelineConfig):
     logger.log_config(config)
     logger.log_world(world)
 
+    # Get checkpoint
+    if config.logging.ckpt.enable:
+        ckpt = Checkpoint(logger.checkpoint_dir)
+        ckpt.setup(world)
+        logger.log_message(f"Checkpoint directory: {ckpt.base_dir}")
+
     # Set precision
     torch.set_float32_matmul_precision(config.train.amp.precision)
     logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}")
@@ -292,7 +299,6 @@ def main(config: PipelineConfig):
                     eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]"))
                     eval_bar.update()
 
-            # Log eval metrics
             if world.is_last_stage:
                 curr_metrics = eval_metrics.compute()
                 logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
@@ -303,10 +309,40 @@ def main(config: PipelineConfig):
             if world.is_last_stage:
                 logger.log_samples(train_step, samples)
 
+        # Checkpoint
+        if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
+            ckpt_dir = ckpt.save(train_step, sharded_model)
+            logger.log_message(f"Saved checkpoint at {ckpt_dir}")
+
+    # Sample after training
     if config.sample.enable:
         samples = sample(sharded_model, tokenizer, world, activation_comm, input_ids_comm, prompt_length, config.sample, device)
         if world.is_last_stage:
             logger.log_samples(train_step, samples)
+
+    # Checkpoint
+    if config.logging.ckpt.enable:
+        ckpt_dir = ckpt.save(train_step, sharded_model)
+        logger.log_message(f"Saved checkpoint at {ckpt_dir}")
+
+    # Test
+    if config.eval.enable:
+        test_metrics = Metrics([Loss(), Perplexity()], name="test")
+        test_range = range(1, num_test_steps+1)
+        test_bar = tqdm(test_range, position=0, leave=True)
+        for test_step in test_range:
+            batch = next(test_dataloader)
+            outputs = eval(test_step, sharded_model, batch, loss_fn, world, comm, device)
+
+            # Compute and log metrics
+            if world.is_last_stage:
+                test_metrics.update(outputs)
+                test_bar.set_description(get_eval_pbar_description(test_metrics, prefix="[TEST]"))
+                test_bar.update()
+
+        if world.is_last_stage:
+            curr_metrics = test_metrics.compute()
+            logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
 
     # Destroy process group
     if world.world_size > 1:
