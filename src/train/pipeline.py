@@ -57,10 +57,9 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
     for micro_batch_id, micro_batch in enumerate(batch_loader):
         # Forward
         input_ids, target_ids = micro_batch["input_ids"].to(device), micro_batch["target_ids"].to(device)
-        input_tensor = comm.recv_forward(micro_batch_id)
-        input_tensor = input_tensor.to(device) if input_tensor is not None else None
+        input_tensor = comm.recv_forward(device=device)
         output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=input_tensor)
-        comm.send_forward(output_tensor, micro_batch_id)
+        comm.send_forward(output_tensor)
 
         if world.is_last_stage:
             # Reshape logits and targets for loss calculation
@@ -87,10 +86,10 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
 
     # Backward
     for micro_batch_id in range(len(batch_loader)): 
-        output_tensor_grad = comm.recv_backward(micro_batch_id)
+        output_tensor_grad = comm.recv_backward(device=device)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = sharded_model.backward(input_tensor, output_tensor, output_tensor_grad)
-        comm.send_backward(input_tensor_grad, micro_batch_id)
+        comm.send_backward(input_tensor_grad)
     
     # Optimizer and scheduler step
     norm = torch.nn.utils.clip_grad_norm_(sharded_model.parameters(), max_norm=config.max_norm)
@@ -113,10 +112,9 @@ def eval(step: int, sharded_model: nn.Module, batch: Dict[str, torch.Tensor], lo
     batch_tokens, batch_examples = 0, 0
     with torch.no_grad():
         input_ids, target_ids = batch["input_ids"].to(device), batch["target_ids"].to(device)
-        input_tensor = comm.recv_forward(0)
-        input_tensor = input_tensor.to(device) if input_tensor is not None else None
-        output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=input_tensor)
-        comm.send_forward(output_tensor, 0)
+        hidden_states = comm.recv_forward(device=device)
+        output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=hidden_states)
+        comm.send_forward(output_tensor)
 
         if world.is_last_stage:
             output_tensor = loss_fn(output_tensor.transpose(1, 2), target_ids)
@@ -144,27 +142,20 @@ def sample(sharded_model: nn.Module, tokenizer: AutoTokenizer, world: World, act
     stop_flag = -torch.ones((config.num_samples, tensor_length), device=device, dtype=torch.long)
     for generated_id in range(prompt_length, tensor_length):
         if world.is_first_stage and generated_id > prompt_length:
-            input_ids = input_ids_comm.recv_from(world.last_stage, requires_grad=False).to(device)
+            input_ids = input_ids_comm.recv_from(world.last_stage, requires_grad=False, device=device)
             if (input_ids == stop_flag).all():
                 break
-        hidden_states = activation_comm.recv_forward()
-        hidden_states = hidden_states.to(device) if hidden_states is not None else None
+        hidden_states = activation_comm.recv_forward(device=device)
         output_tensor = sharded_model.forward(input_ids=input_ids, hidden_states=hidden_states)
         activation_comm.send_forward(output_tensor)
 
         if world.is_last_stage:
-            logger.log_message(output_tensor.shape)
             logits = output_tensor[:, generated_id-1, :] / config.temperature # (B, V)
-            logger.log_message(logits.shape)
             if config.top_k is not None:
                 v, _ = torch.topk(logits, min(config.top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf') # (B, V)
-            logger.log_message(logits.shape)
             probs = F.softmax(logits, dim=-1) # (B, V)
-            logger.log_message(probs.shape)
             idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
-            logger.log_message(idx_next)
-            logger.log_message(idx_next.squeeze())
             input_ids[:, generated_id] = idx_next.squeeze()
             if tokenizer.eos_token_id is not None and (idx_next == tokenizer.eos_token_id).all():
                 input_ids_comm.send_to(stop_flag, world.first_stage)

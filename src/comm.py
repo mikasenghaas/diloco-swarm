@@ -20,8 +20,8 @@ class Comm:
         req = dist.isend(tensor.detach().clone(), dst=peer, tag=tag)
         self.synchronize(req)
 
-    def recv_from(self, peer: int, tag: int = 0, requires_grad: bool = True) -> torch.Tensor:
-        tensor = torch.empty(self.shape, requires_grad=requires_grad, device="cuda", dtype=self.dtype)
+    def recv_from(self, peer: int, tag: int = 0, device: Optional[torch.device] = None, requires_grad: bool = True) -> torch.Tensor:
+        tensor = torch.empty(self.shape, requires_grad=requires_grad, device=device, dtype=self.dtype)
         req = dist.irecv(tensor, src=peer, tag=tag)
         self.synchronize(req)
         return tensor
@@ -30,17 +30,17 @@ class Comm:
         if self.world.is_last_stage: return
         self.send_to(tensor, self.world.next_rank(), tag)
 
-    def recv_forward(self, tag: int = 0) -> Optional[torch.Tensor]:
+    def recv_forward(self, tag: int = 0, device: Optional[torch.device] = None) -> Optional[torch.Tensor]:
         if self.world.is_first_stage: return None
-        return self.recv_from(self.world.prev_rank(), tag)
+        return self.recv_from(self.world.prev_rank(), tag, device)
 
     def send_backward(self, tensor: torch.Tensor, tag: int = 0) -> None:
         if self.world.is_first_stage: return
         self.send_to(tensor, self.world.prev_rank(), tag)
 
-    def recv_backward(self, tag: int = 0) -> Optional[torch.Tensor]:
+    def recv_backward(self, tag: int = 0, device: Optional[torch.device] = None) -> Optional[torch.Tensor]:
         if self.world.is_last_stage: return None
-        return self.recv_from(self.world.next_rank(), tag)
+        return self.recv_from(self.world.next_rank(), tag, device)
 
     def __str__(self):
         return f"Comm(world={self.world}, shape={self.shape}, dtype={self.dtype})"
