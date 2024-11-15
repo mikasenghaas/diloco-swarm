@@ -169,8 +169,7 @@ def sample(sharded_model: nn.Module, tokenizer: AutoTokenizer, world: World, act
     return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids] if world.is_last_stage else []
 
 def main(config: PipelineConfig):
-    global logger
-    # Set precision and seed
+    # Seed everything
     seed_everything(config.train.seed)
 
     # Get world parameters
@@ -179,18 +178,17 @@ def main(config: PipelineConfig):
     # Set device
     device = get_device(local_rank)
     torch.cuda.set_device(local_rank)
-    world = World(local_rank, world_size, device)
 
-    # Synchronize processes to ensure consistent timestamp
-    dist.barrier()
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Get world
+    world = World(local_rank, world_size, device)
 
     # Get logger
     logger_name = f"{local_rank}" if world_size > 1 else "master"
-    logger = get_logger(config.logging, logger_name, run_id)
+    logger = get_logger(config.logging, logger_name, world.run_id)
+    
+    # Log values
     logger.log_config(config)
-    logger.log_message(f"Using device: {device}")
-    logger.log_message(world)
+    logger.log_world(world)
 
     # Set precision
     torch.set_float32_matmul_precision(config.train.amp.precision)

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GROUP="baseline/benchmark"
+TAGS="baseline,benchmark"
 
 # Benchmarking GPU throughput of GPT-2 on Single GPU
 # Model: GPT-2 (124M)
@@ -19,5 +19,5 @@ do
         --model @configs/model/gpt2-small.toml \
         --data @configs/data/wikitext.toml \
         --train.micro_batch_size $MICRO_BATCH_SIZE \
-        --logging.wandb.group $GROUP
+        --logging.wandb.tags $TAGS
 done

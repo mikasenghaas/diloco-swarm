@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -e
-GROUP="baseline/verify/overfit"
+TAGS="baseline,overfit"
 
 python src/train/baseline.py @configs/debug.toml \
     --model @configs/model/gpt2-small.toml \
@@ -11,5 +11,5 @@ python src/train/baseline.py @configs/debug.toml \
     --train.max_steps 100 \
     --train.batch_size 1 \
     --train.micro_batch_size 1 \
-    # --logging.wandb.enable true \
-    # --logging.wandb.group $GROUP
+    --logging.wandb.enable true \
+    --logging.wandb.tags $TAGS

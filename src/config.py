@@ -1,5 +1,7 @@
-from typing import Literal
+from typing import Literal, List
 from pydantic_config import BaseConfig, parse_argv
+from pydantic import field_validator
+
 
 class ModelConfig(BaseConfig):
     n_layer: int
@@ -73,9 +75,16 @@ class WandbLoggingConfig(BaseConfig):
     enable: bool = False
     entity: str | None = "mikasenghaas"
     project: str | None = "swarm"
+    tags: List[str] = []
     group: str | None = None
     run_name: str | None = None
     cache_dir: str | None = None
+
+    @field_validator('tags', mode='before')
+    def split_string_tags(cls, v):
+        if isinstance(v, str):
+            return v.split(',')
+        return v
 
 class LoggingConfig(BaseConfig):
     log_dir: str = "logs"

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -e
-GROUP="baseline/verify/grad-acc"
+TAGS="baseline,grad-acc"
 
 for MICRO_BATCH_SIZE in 1 32 64
 do
@@ -10,7 +10,7 @@ do
         --data @configs/data/wikitext.toml \
         --logging.file.enable true \
         --logging.wandb.enable true \
-        --logging.wandb.group $GROUP \
+        --logging.wandb.tags $TAGS \
         --train.micro_batch_size $MICRO_BATCH_SIZE \
         --train.batch_size 64
 done

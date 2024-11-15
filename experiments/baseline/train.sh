@@ -2,7 +2,7 @@
 
 set -e
 
-GROUP="baseline/train"
+TAGS="baseline,train"
 
 # Train GPT-2 on Fineweb-Edu 1BT
 # ---
@@ -19,4 +19,4 @@ GROUP="baseline/train"
 python src/train/baseline.py @configs/train.toml \
     --model @configs/model/gpt2-small.toml \
     --data @configs/data/fineweb-edu-1bt.toml \
-    --logging.wandb.group $GROUP
+    --logging.wandb.tags $TAGS

@@ -5,13 +5,12 @@ from typing import Optional, Dict, List
 from enum import Enum
 from datetime import datetime
 
-import torch.nn as nn
-from transformers import AutoTokenizer
 from pydantic_config import BaseConfig
 import wandb
 
 from src.config import LoggingConfig
 from src.ckpt import Checkpoint
+from src.world import World
 from src.model import GPT2
 
 class Level(Enum):
@@ -49,8 +48,9 @@ class CustomLogger:
             self.wandb_run = wandb.init(
                 project=self.config.wandb.project,
                 entity=self.config.wandb.entity,
-                group=self.config.wandb.group,
+                tags=self.config.wandb.tags,
                 name=self.config.wandb.run_name,
+                group=self.run_id,
                 dir=self.log_dir
             )
 
@@ -85,6 +85,11 @@ class CustomLogger:
         self.log_message(config_str, level=level)
         if self.wandb_run:
             wandb.config.update(config_dict)
+
+    def log_world(self, world: World, level: Level = Level.INFO) -> None:
+        self.log_message(world, level=level)
+        if self.wandb_run:
+            wandb.config.update({"world": dict(world)})
 
     def log_metrics(self, metrics: Dict[str, float], step: int | None = None, level: Level = Level.INFO) -> None:
         self.log_message(metrics, level=level)

@@ -19,6 +19,7 @@ from datasets import disable_progress_bar
 from tqdm import tqdm
 
 from src.logger import Level
+from src.world import World
 from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
 from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
@@ -152,6 +153,10 @@ def main(config: BaselineConfig):
     # Get device
     device = get_device()
     logger.log_message(f"Using device: {device}")
+
+    # Get world
+    world = World(local_rank=0, world_size=1, device=device)
+    logger.log_world(world)
 
     # Load model
     model = get_model(config.model)
