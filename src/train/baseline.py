@@ -222,6 +222,20 @@ def main(config: BaselineConfig):
     # Start Training
     train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
+
+    # Validate before training
+    if config.eval.enable:
+        eval_bar = tqdm(range(1, num_eval_steps+1), position=0, leave=True)
+        eval_metrics.reset()
+        for eval_step in eval_bar:
+            batch = next(val_dataloader)
+            outputs = eval(eval_step, model, batch, loss_fn, device)
+            eval_metrics.update(outputs)
+            eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]"))
+
+        curr_metrics = eval_metrics.compute()
+        logger.log_metrics(curr_metrics, level=Level.DEBUG, step=0)
+
     train_bar = tqdm(range(1, num_train_steps+1), position=0, leave=True)
     for train_step in train_bar:
         # Train step
@@ -240,11 +254,8 @@ def main(config: BaselineConfig):
             eval_bar = tqdm(range(1, num_eval_steps+1), position=1, leave=False)
             eval_metrics.reset()
             for eval_step in eval_bar:
-                # Eval step
                 batch = next(val_dataloader)
                 outputs = eval(eval_step, model, batch, loss_fn, device)
-
-                # Compute and log metrics
                 eval_metrics.update(outputs)
                 eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]"))
 
