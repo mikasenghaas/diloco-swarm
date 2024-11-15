@@ -54,7 +54,7 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
     # Zero-out gradient
     optimizer.zero_grad()
     grad_accumulation_steps = len(batch_loader)
-    for micro_batch_id, micro_batch in enumerate(batch_loader):
+    for micro_batch in batch_loader:
         # Forward
         input_ids, target_ids = micro_batch["input_ids"].to(device), micro_batch["target_ids"].to(device)
         input_tensor = comm.recv_forward(device=device)
@@ -81,13 +81,8 @@ def train(step: int, sharded_model: nn.Module, batch_loader: DataLoader, loss_fn
             batch_examples += input_ids.shape[0]
             batch_tokens += input_ids.shape[0] * input_ids.shape[1]
 
-        input_tensors.append(input_tensor)
-        output_tensors.append(output_tensor)
-
-    # Backward
-    for micro_batch_id in range(len(batch_loader)): 
         output_tensor_grad = comm.recv_backward(device=device)
-        input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
+        # input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = sharded_model.backward(input_tensor, output_tensor, output_tensor_grad)
         comm.send_backward(input_tensor_grad)
     
