@@ -12,5 +12,5 @@ python src/train/baseline.py @configs/debug.toml \
     --train.batch_size 1 \
     --train.micro_batch_size 1 \
     --logging.ckpt.enable true \
-    # --logging.wandb.enable true \
-    # --logging.wandb.tags $TAGS
+    --logging.wandb.enable true \
+    --logging.wandb.tags $TAGS

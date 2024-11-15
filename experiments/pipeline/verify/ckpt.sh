@@ -12,6 +12,6 @@ torchrun --nproc_per_node 2 src/train/pipeline.py @configs/debug.toml \
     --train.batch_size 1 \
     --train.micro_batch_size 1 \
     --logging.console.enable false \
-    --logging.ckpt.enable true
-    # --logging.wandb.enable true \
-    # --logging.wandb.tags $TAGS
+    --logging.ckpt.enable true \
+    --logging.wandb.enable true \
+    --logging.wandb.tags $TAGS
