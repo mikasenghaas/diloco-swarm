@@ -121,7 +121,7 @@ def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) 
 def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = None, return_tensors: str | None = "pt") -> Dict[str, Any]:
     if max_length is None:
         return tokenizer(sample, return_tensors=return_tensors)
-    return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length+1, return_tensors=return_tensors)
+    return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length, return_tensors=return_tensors)
 
 def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()

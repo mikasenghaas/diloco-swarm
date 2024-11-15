@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -e
-GROUP="pp/verify/overfit"
+GROUP="pipeline/verify/overfit"
 
 torchrun --nproc_per_node 2 src/train/pipeline.py @configs/debug.toml \
     --model @configs/model/gpt2-small.toml \
@@ -12,6 +12,6 @@ torchrun --nproc_per_node 2 src/train/pipeline.py @configs/debug.toml \
     --sample.enable true \
     --train.max_steps 100 \
     --train.batch_size 1 \
-    --train.micro_batch_size 1 
-    # --logging.wandb.enable true \
-    # --logging.wandb.group $GROUP
+    --train.micro_batch_size 1 \
+    --logging.wandb.enable true \
+    --logging.wandb.group $GROUP

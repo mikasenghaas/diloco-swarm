@@ -170,9 +170,9 @@ def main(config: BaselineConfig):
 
     # Prepare dataset
     seq_length = config.data.seq_length
-    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length+1, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length+1, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length+1, return_tensors=None), batched=True, num_proc=os.cpu_count())
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders

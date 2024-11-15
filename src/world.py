@@ -1,14 +1,17 @@
+import os
+import torch
 import torch.distributed as dist
 
 class World:
-    def __init__(self, local_rank: int, world_size: int, debug: bool = False):
+    def __init__(self, local_rank: int, world_size: int, device: torch.device, debug: bool = False):
+        os.environ["OMP_NUM_THREADS"] = "1"
+        self.num_threads = int(os.environ.get("OMP_NUM_THREADS", 1))
         self.local_rank = local_rank
         self.world_size = world_size
         self.group = None
 
         if world_size > 1 and not debug:
-            dist.init_process_group(backend="nccl")
-            self.group = dist.new_group(list(range(self.world_size)))
+            dist.init_process_group(backend="nccl", device_id=device)
 
     def next_rank(self) -> int:
         return None if self.local_rank == self.world_size - 1 else (self.local_rank + 1) % self.world_size

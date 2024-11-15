@@ -17,11 +17,11 @@ class Comm:
         torch.cuda.synchronize()
 
     def send_to(self, tensor: torch.Tensor, peer: int, tag: int = 0) -> None:
-        req = dist.isend(tensor, dst=peer, tag=tag)
+        req = dist.isend(tensor.detach().clone(), dst=peer, tag=tag)
         self.synchronize(req)
 
-    def recv_from(self, peer: int, tag: int = 0) -> torch.Tensor:
-        tensor = torch.empty(self.shape, requires_grad=True, device="cuda", dtype=self.dtype)
+    def recv_from(self, peer: int, tag: int = 0, requires_grad: bool = True) -> torch.Tensor:
+        tensor = torch.empty(self.shape, requires_grad=requires_grad, device="cuda", dtype=self.dtype)
         req = dist.irecv(tensor, src=peer, tag=tag)
         self.synchronize(req)
         return tensor
