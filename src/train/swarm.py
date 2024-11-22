@@ -67,23 +67,34 @@ class DistributedSampler(Sampler):
 class Model(nn.Module):
     def __init__(self, hidden_dim: int):
         super().__init__()
-        self.fc1 = nn.Linear(1, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
-        self.layers = nn.ModuleList([self.fc1, self.fc2])
+        self.embed = nn.Linear(1, hidden_dim)
+        self.blocks = nn.ModuleList([
+            nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim))
+            for _ in range(2)
+        ])
+        self.head = nn.Linear(hidden_dim, 1)
 
 class ShardedModel(nn.Module):
-    def __init__(self, model: nn.Module, stage: int):
+    def __init__(self, model: nn.Module, stage: int, num_stages: int):
         super().__init__()
-        self.layers = nn.ModuleList([model.layers[stage]])
-        self.act_fn = nn.ReLU() if stage == 0 else nn.Identity()
+        self.embed = model.embed if stage == 0 else nn.Identity()
+        self.stage = stage
+        self.num_stages = num_stages
+        self.blocks = nn.ModuleList([model.blocks[i] for i in self.distribute_layers(len(model.blocks))])
+        self.head = model.head if stage == num_stages - 1 else nn.Identity()
         del model
+
+    def distribute_layers(self, num_layers):
+        layers_per_gpu = [num_layers // self.num_stages + (1 if i < num_layers % self.num_stages else 0) for i in range(self.num_stages)]
+        start_layer = sum(layers_per_gpu[:self.stage])
+        return list(range(start_layer, start_layer + layers_per_gpu[self.stage]))
 
     def forward(self, input_ids: torch.Tensor | None = None, hidden_states: torch.Tensor | None = None) -> torch.Tensor:
         assert input_ids is not None or hidden_states is not None
-        x = hidden_states if hidden_states is not None else input_ids
-        for layer in self.layers:
-            x = self.act_fn(layer(x))
-        return x
+        x = hidden_states if hidden_states is not None else self.embed(input_ids)
+        for layer in self.blocks:
+            x = layer(x)
+        return self.head(x)
 
     def backward(self, input_tensor, output_tensor, output_tensor_grad):
         if input_tensor is not None: input_tensor.retain_grad()
@@ -154,14 +165,14 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     dist.barrier()
 
     # Setup
-    max_steps = 10
-    num_samples = 10
-    batch_size = 10
-    micro_batch_size = 5
-    hidden_dim = 1000
+    max_steps = 100
+    num_samples = 100
+    batch_size = 100
+    micro_batch_size = 100
+    hidden_dim = 100
     assert batch_size % micro_batch_size == 0, "Regular batch size must be divisible by micro batch size"
     assert (num_samples % batch_size) % micro_batch_size == 0, "Last batch size must be divisible by micro batch size"
-    model = ShardedModel(Model(hidden_dim=hidden_dim), stage)
+    model = ShardedModel(Model(hidden_dim=hidden_dim), stage, num_stages)
     dataset = Data(length=num_samples)
     data_loader = cycle_iter(DataLoader(dataset, batch_size=batch_size, shuffle=False))
 
@@ -191,11 +202,12 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
 
 
     # Initialize optimizer and loss function
-    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-3)
     loss_fn = nn.MSELoss()
     
     # Synchronize all processes
     dist.barrier()
+    history = []
     for step in range(1, max_steps + 1):
         batch = next(data_loader)
         optimizer.zero_grad()
@@ -209,11 +221,14 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
         batch_data = MicroBatchDataset(batch)
         stage0_ranks = [r for r, s in rank_to_stage.items() if s == 0]
         targets = {} # (root, micro_step) -> micro_batch
+        target_list = []
         for r in stage0_ranks:
             micro_sampler = DistributedSampler(batch_data, rank=r, ranks=stage0_ranks, micro_batch_size=micro_batch_size)
             micro_dataloader = iter(DataLoader(batch_data, batch_size=micro_batch_size, sampler=micro_sampler, shuffle=False))
             for micro_step, micro_batch in enumerate(micro_dataloader, start=1):
-                targets[(r, micro_step)] = micro_batch["labels"].detach()
+                target = micro_batch["labels"].detach()
+                target_list.append(target)
+                targets[(r, micro_step)] = target
 
         # Forward pass
         if stage == 0: # first stage
@@ -239,24 +254,30 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
                     store.set("step", str(step + 1))
 
         elif stage == num_stages - 1: # last stage
+            preds = torch.empty(0, device="cpu")
             batch_loss = torch.tensor(0.0, device="cpu")
             while not (step < int(store.get("step").decode()) ):
                 if recv_queue.empty():
                     time.sleep(TIMEOUT)
                     continue
                 src, root, micro_step, input_tensor = recv_queue.get()
-                output_tensor = model(hidden_states=input_tensor)
+                output_tensor = model(hidden_states=input_tensor) # preds for micro_step
                 loss = loss_fn(output_tensor, targets[(root, micro_step)])
                 
                 input_tensor_grad = model.backward(input_tensor, loss, None)
                 backward_send_queue.put((src, root, micro_step, input_tensor_grad))
 
                 batch_loss += loss.detach()
+                preds = torch.cat([preds, output_tensor], dim=0)
 
             # Sum loss across workers and divide by total number of micro batches
             dist.all_reduce(batch_loss, op=dist.ReduceOp.SUM, group=peer_group)
             batch_loss = batch_loss / total_micro_steps
-            
+
+            # Sync preds and targets
+            targets = torch.cat(target_list, dim=0)
+            history.append((preds.tolist(), targets.tolist(), batch_loss.item()))
+
             if rank == peers[0]:
                 print(f"Step {step}: Loss: {batch_loss.item()}")
 
@@ -268,11 +289,45 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
         optimizer.step()
         dist.barrier()
 
+    # Plot the results as an animation
+    if rank == 1:
+        import numpy as np
+        from matplotlib import pyplot as plt
+        fig, ax = plt.subplots()
+        ax.set_xlim(-5, 5)
+        ax.set_ylim(-5, 25)
+        line, = ax.plot([], [], 'r-', label='Predictions')
+        scatter = ax.scatter([], [], c='b', label='Targets')
+        text = ax.text(0.02, 0.95, '', transform=ax.transAxes)
+        ax.legend()
+
+        def animate(frame):
+            preds, targets, loss = history[frame]
+            # Convert to numpy arrays and ensure they're flat
+            preds = np.array(preds).flatten()
+            targets = np.array(targets).flatten()
+            x = np.linspace(-5, 5, len(preds))
+            
+            line.set_data(x, preds)
+            # Create proper 2D array of coordinates for scatter
+            points = np.column_stack((x, targets))
+            scatter.set_offsets(points)
+            
+            ax.set_title(f'Step {frame + 1}')
+            text.set_text(f'Loss: {loss:.4f}')
+            
+            plt.draw() # Force title update
+            return line, scatter, text
+
+        from matplotlib.animation import FuncAnimation
+        anim = FuncAnimation(fig, animate, frames=len(history), interval=200, blit=False) # Set blit=False to allow title updates
+        plt.show()
+
     # Final cleanup
     dist.destroy_process_group()
 
 def main():
-    world_size, num_stages = 6, 2
+    world_size, num_stages = 3, 2
     assert world_size >= num_stages, "World size must be greater than or equal to number of stages"
     master_addr, master_port = "localhost", 29500
     mp.spawn(train, args=(world_size, num_stages, master_addr, master_port), nprocs=world_size, join=True)
