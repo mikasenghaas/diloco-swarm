@@ -31,22 +31,33 @@ class MicroBatchDataset(Dataset):
         return {k: v[idx] for k, v in self.batch.items()}
 
 class DistributedSampler(Sampler):
-    def __init__(self, dataset: Dataset, rank: int, ranks: List[int]):
+    def __init__(self, dataset: Dataset, rank: int, ranks: List[int], micro_batch_size: int):
         self.dataset = dataset
         self.rank = rank
         self.ranks = ranks
         self.num_ranks = len(ranks)
         self.idx2rank = {i: rank for i, rank in enumerate(ranks)}
         self.rank2idx = {rank: i for i, rank in enumerate(ranks)}
+        self.micro_batch_size = micro_batch_size
 
     def __len__(self):
-        return (len(self.dataset) + self.num_ranks - self.rank2idx[self.rank] - 1) // self.num_ranks
+        total_samples = len(self.dataset)
+        samples_per_full_round = self.num_ranks * self.micro_batch_size
+        
+        full_rounds = total_samples // samples_per_full_round
+        samples_from_full_rounds = full_rounds * self.micro_batch_size
+        
+        remaining_samples = total_samples % samples_per_full_round
+        rank_start_in_last_round = self.rank2idx[self.rank] * self.micro_batch_size
+        remaining_for_rank = max(0, min(self.micro_batch_size, remaining_samples - rank_start_in_last_round))
+        
+        return samples_from_full_rounds + remaining_for_rank
 
     def __iter__(self):
-        return iter([
-            batch_idx for batch_idx in range(len(self.dataset)) 
-            if self.idx2rank[batch_idx % self.num_ranks] == self.rank
-        ])
+        for batch_start in range(0, len(self.dataset), self.num_ranks * self.micro_batch_size):
+            rank_start = batch_start + (self.rank2idx[self.rank] * self.micro_batch_size)
+            for idx in range(rank_start, min(rank_start + self.micro_batch_size, len(self.dataset))):
+                yield idx
 
 class Model(nn.Module):
     def __init__(self):
@@ -83,13 +94,12 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     stage = rank % num_stages
     store.set(f"rank{rank}", str(stage))
 
-    num_samples = 8
+    num_samples = 10
     batch_size = 4
     micro_batch_size = 2
     hidden_dim = 1
-    assert num_samples % batch_size == 0, "Num samples must be divisible by batch size"
-    assert batch_size % micro_batch_size == 0, "Batch size must be divisible by micro batch size"
-    store.set(f"total_micro_steps", str(batch_size // micro_batch_size))
+    assert batch_size % micro_batch_size == 0, "Regular batch size must be divisible by micro batch size"
+    assert (num_samples % batch_size) % micro_batch_size == 0, "Last batch size must be divisible by micro batch size"
     model = ShardedModel(Model(), stage)
     dataset = Data(length=num_samples, hidden_dim=hidden_dim)
     data_loader = iter(DataLoader(dataset, batch_size=batch_size, shuffle=False))
@@ -107,12 +117,14 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     dist.barrier()
     for step in range(1, len(data_loader) + 1):
         batch = next(data_loader)
+        micro_steps = len(batch["input_ids"]) // micro_batch_size
         store.set(f"step", str(step))
         store.set(f"micro_steps", "0")
+        store.set(f"total_micro_steps", str(micro_steps))
         rank_to_stage = {rank: int(store.get(f"rank{rank}").decode()) for rank in range(world_size)}
         if stage == 0:
             batch_data = MicroBatchDataset(batch)
-            micro_sampler = DistributedSampler(batch_data, rank=rank, ranks=[r for r, s in rank_to_stage.items() if s == 0])
+            micro_sampler = DistributedSampler(batch_data, rank=rank, ranks=[r for r, s in rank_to_stage.items() if s == 0], micro_batch_size=micro_batch_size)
             micro_dataloader = iter(DataLoader(batch_data, batch_size=micro_batch_size, sampler=micro_sampler, shuffle=False))
             for micro_step in range(1, len(micro_dataloader) + 1):
                 micro_batch = next(micro_dataloader)
