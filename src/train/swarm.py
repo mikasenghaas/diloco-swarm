@@ -1,13 +1,13 @@
 import random
 import threading
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 from queue import Queue
 
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 class Data(Dataset):
     def __init__(self, length: int, hidden_dim: int):
@@ -29,6 +29,24 @@ class MicroBatchDataset(Dataset):
 
     def __getitem__(self, idx):
         return {k: v[idx] for k, v in self.batch.items()}
+
+class DistributedSampler(Sampler):
+    def __init__(self, dataset: Dataset, rank: int, ranks: List[int]):
+        self.dataset = dataset
+        self.rank = rank
+        self.ranks = ranks
+        self.num_ranks = len(ranks)
+        self.idx2rank = {i: rank for i, rank in enumerate(ranks)}
+        self.rank2idx = {rank: i for i, rank in enumerate(ranks)}
+
+    def __len__(self):
+        return (len(self.dataset) + self.num_ranks - self.rank2idx[self.rank] - 1) // self.num_ranks
+
+    def __iter__(self):
+        return iter([
+            batch_idx for batch_idx in range(len(self.dataset)) 
+            if self.idx2rank[batch_idx % self.num_ranks] == self.rank
+        ])
 
 class Model(nn.Module):
     def __init__(self):
@@ -61,16 +79,20 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     store = dist.TCPStore(master_host, master_port, world_size, is_master=rank == 0)
     dist.init_process_group("gloo", rank=rank, world_size=world_size, store=store)
 
-    # Set up 
-    stage = 0 if rank == 0 else 1  # stage = rank % num_stages
+    # Distribute ranks to stages
+    stage = rank % num_stages
+    store.set(f"rank{rank}", str(stage))
+
     num_samples = 8
     batch_size = 4
-    micro_batch_size = 1
+    micro_batch_size = 2
     hidden_dim = 1
+    assert num_samples % batch_size == 0, "Num samples must be divisible by batch size"
     assert batch_size % micro_batch_size == 0, "Batch size must be divisible by micro batch size"
     store.set(f"total_micro_steps", str(batch_size // micro_batch_size))
     model = ShardedModel(Model(), stage)
-    data_loader = iter(DataLoader(Data(length=num_samples, hidden_dim=hidden_dim), batch_size=batch_size, shuffle=False))
+    dataset = Data(length=num_samples, hidden_dim=hidden_dim)
+    data_loader = iter(DataLoader(dataset, batch_size=batch_size, shuffle=False))
 
     # Start receive thread
     recv_queue = Queue()
@@ -87,12 +109,16 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
         batch = next(data_loader)
         store.set(f"step", str(step))
         store.set(f"micro_steps", "0")
+        rank_to_stage = {rank: int(store.get(f"rank{rank}").decode()) for rank in range(world_size)}
         if stage == 0:
-            microdataloader = iter(DataLoader(MicroBatchDataset(batch), batch_size=micro_batch_size))
-            for micro_step in range(1, len(microdataloader) + 1):
-                micro_batch = next(microdataloader)
+            batch_data = MicroBatchDataset(batch)
+            micro_sampler = DistributedSampler(batch_data, rank=rank, ranks=[r for r, s in rank_to_stage.items() if s == 0])
+            micro_dataloader = iter(DataLoader(batch_data, batch_size=micro_batch_size, sampler=micro_sampler, shuffle=False))
+            for micro_step in range(1, len(micro_dataloader) + 1):
+                micro_batch = next(micro_dataloader)
                 output = model(micro_batch["input_ids"])
-                dst = random.choice([1,2])
+                next_stages = [r for r, s in rank_to_stage.items() if s == 1]
+                dst = random.choice(next_stages)
                 dist.send(output, dst=dst)
                 print(f"[Rank {rank}] Step {step}, Micro {micro_step}: Sent activations to rank {dst}")
         else:
@@ -113,7 +139,7 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     dist.destroy_process_group()
 
 def main():
-    world_size, num_stages = 3, 2
+    world_size, num_stages = 4, 2
     master_addr, master_port = "localhost", 29500
     mp.spawn(train, args=(world_size, num_stages, master_addr, master_port), nprocs=world_size, join=True)
 
