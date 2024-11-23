@@ -3,8 +3,6 @@ import random
 import threading
 from queue import Queue
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
-from collections import defaultdict
 from itertools import cycle as cycle_iter
 
 import torch
@@ -13,7 +11,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils.data import Dataset, DataLoader, Sampler
 
-TIMEOUT = 0.1
+TIMEOUT = 0.001 # critical to tune
 
 class Data(Dataset):
     def __init__(self, length: int):
@@ -186,14 +184,7 @@ class SwarmWorld:
     def _assign_stage(self, rank: int) -> int: # Uniformly distribute ranks to stages
         return rank % self.num_stages
 
-@dataclass
-class Metadata:
-    root: int
-    local_micro_step: int
-
-    def __hash__(self):
-        return hash((self.root, self.local_micro_step))
-
+Metadata = Tuple[int, int] # (root, local_micro_step)
 SerializedType = torch.Tensor
 DeserializedType = Tuple[torch.Tensor, Metadata]
 
@@ -203,8 +194,8 @@ class Serializer:
 
     def serialize(self, tensor: torch.Tensor, metadata: Metadata) -> SerializedType:
         metadata_tensor = torch.empty(tensor.numel(), device=tensor.device)
-        metadata_tensor[0] = float(metadata.root)
-        metadata_tensor[1] = float(metadata.local_micro_step)
+        metadata_tensor[0] = float(metadata[0])
+        metadata_tensor[1] = float(metadata[1])
         metadata_tensor = metadata_tensor.reshape(tensor.shape)
         return torch.cat([metadata_tensor.unsqueeze(0), tensor.unsqueeze(0)], dim=0)
 
@@ -213,7 +204,7 @@ class Serializer:
         tensor = serialized[1:]
         root = int(metadata_tensor[0].item())
         local_micro_step = int(metadata_tensor[1].item())
-        return tensor.squeeze(0), Metadata(root, local_micro_step)
+        return tensor.squeeze(0), (root, local_micro_step)
 
 class SwarmComm:
     def __init__(self, model: ShardedModel, world: SwarmWorld, serializer: Serializer, shape: Tuple):
@@ -233,35 +224,36 @@ class SwarmComm:
         if self.world.is_last_stage: return
         dst = random.choice(self.world.get_stage_ranks(self.world.stage + 1))
         self.forward_send_queue.put((dst, tensor, metadata))
-        # print(f"Rank {self.world.rank}: Sent activations to {dst} ({metadata})")
+        # print(f"Rank {self.world.rank}: Sent activations to {dst} {metadata}")
 
     def send_backward(self, dst: int, tensor: torch.Tensor, metadata: Metadata) -> None:
         if self.world.is_first_stage: return
         self.backward_send_queue.put((dst, tensor, metadata))
-        # print(f"Rank {self.world.rank}: Sent gradients to {dst} ({metadata})")
+        # print(f"Rank {self.world.rank}: Sent gradients to {dst} {metadata}")
 
     def recv_forward(self) -> Optional[Tuple[int, DeserializedType]]:
         src, tensor, metadata = self.forward_recv_queue.get()
-        # print(f"Rank {self.world.rank}: Received activations from {src} ({metadata})")
+        # print(f"Rank {self.world.rank}: Received activations from {src} {metadata}")
         return src, tensor, metadata
 
     def recv_backward(self) -> Optional[Tuple[int, DeserializedType]]:
         if self.world.is_last_stage: return None
         src, tensor, metadata = self.backward_recv_queue.get()
-        # print(f"Rank {self.world.rank}: Received gradients from {src} ({metadata})")
+        # print(f"Rank {self.world.rank}: Received gradients from {src} {metadata}")
         return src, tensor, metadata
 
-    def load_forward_queue(self, micro_batches: Dict[int, Dict[str, torch.Tensor]]) -> None:
-        for local_micro_step, micro_batch in micro_batches.items():
-            input_tensor = micro_batch["inputs"]
-            metadata = Metadata(self.world.rank, local_micro_step)
-            self.forward_recv_queue.put((-1, input_tensor, metadata))
+    def load_forward_queue(self, local_micro_step: int, input_tensor: torch.Tensor) -> None:
+        metadata = (self.world.rank, local_micro_step)
+        self.forward_recv_queue.put((-1, input_tensor, metadata))
 
     def can_receive_forward(self) -> bool:
         return not self.forward_recv_queue.empty()
 
     def can_receive_backward(self) -> bool:
         return not self.backward_recv_queue.empty()
+
+    def can_receive(self) -> bool:
+        return self.can_receive_forward() or self.can_receive_backward()
 
     def sync_gradients(self) -> None:
         for param in self.model.parameters():
@@ -281,6 +273,7 @@ class SwarmComm:
     def _send_loop(self, send_queue: Queue, group: dist.ProcessGroup | None = None):
         while True:
             if send_queue.empty():
+                time.sleep(TIMEOUT)
                 continue
             dst, tensor, metadata = send_queue.get()
             serialized = self.serializer.serialize(tensor, metadata)
@@ -294,7 +287,7 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     world = SwarmWorld(rank, world_size, num_stages, master_host, master_port)
 
     # Setup
-    max_steps = 10
+    max_steps = 5
     num_samples = 100
     batch_size = 100
     micro_batch_size = 100
@@ -326,39 +319,35 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
         # Prepare batch batch
         batch = next(data_loader)
         batch_data = MicroBatchDataset(batch)
-        micro_batches = defaultdict(dict) # (rank) -> (local_micro_step) -> micro_batch
+        targets = {} # (rank, local_micro_step) -> micro_batch
         for rank in world.get_stage_ranks(0):
             micro_sampler = DistributedSampler(batch_data, rank=rank, ranks=world.get_stage_ranks(0), micro_batch_size=micro_batch_size)
             micro_dataloader = iter(DataLoader(batch_data, batch_size=micro_batch_size, sampler=micro_sampler, shuffle=False))
             for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
-                micro_batches[rank][local_micro_step] = micro_batch
-        comm.load_forward_queue(micro_batches[world.rank])
-        dist.barrier()
+                if world.is_last_stage: targets[(rank, local_micro_step)] = micro_batch["labels"].detach()
+                elif world.is_first_stage: comm.load_forward_queue(local_micro_step, micro_batch["inputs"])
 
-        # Push micro batches through swarm
-        # Initialize statistics
+        # Training loop
         batch_loss = torch.tensor(0.0, device="cpu")
         input_output_tensors = {} # (rank, local_micro_step) -> (src, input_tensor, output_tensor)
         while not world.step_done(step):
-            # All stages: Receive forward and/ or backward data
-            if comm.can_receive_forward():
-                src, input_tensor, metadata = comm.recv_forward()
+            if comm.can_receive_forward(): # Forward
+                src, input_tensor, (root, local_micro_step) = comm.recv_forward()
                 output_tensor = model(input_tensor)
-                input_output_tensors[metadata] = (src, input_tensor, output_tensor)
-                comm.send_forward(output_tensor, metadata)
+                input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
+                comm.send_forward(output_tensor, (root, local_micro_step))
 
                 if world.is_last_stage: # Last stage: Compute loss and send gradients
-                    targets = micro_batches[metadata.root][metadata.local_micro_step]["labels"].detach()
-                    loss = loss_fn(output_tensor, targets)
+                    loss = loss_fn(output_tensor, targets[(root, local_micro_step)])
                     batch_loss += loss.detach()
                     input_tensor_grad = model.backward(input_tensor, loss, None)
-                    comm.send_backward(src, input_tensor_grad, metadata)
+                    comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
 
-            if comm.can_receive_backward():
-                _, output_tensor_grad, metadata = comm.recv_backward()
-                src, input_tensor, output_tensor = input_output_tensors[metadata]
+            if comm.can_receive_backward(): # Backward
+                _, output_tensor_grad, (root, local_micro_step) = comm.recv_backward()
+                src, input_tensor, output_tensor = input_output_tensors[(root, local_micro_step)]
                 input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
-                comm.send_backward(src, input_tensor_grad, metadata)
+                comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
 
                 if world.is_first_stage: # First stage: Signal to world that query is done
                     world.query_done()
