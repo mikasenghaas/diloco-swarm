@@ -110,14 +110,14 @@ def start_receiving(recv_queue: Queue, shape: Tuple[int, int], group: dist.Proce
         (root, batch_idx), tensor = deserialize(serialized, 2)
         recv_queue.put((src, root, batch_idx, tensor))
 
-def start_sending(send_queue: Queue):
+def start_sending(send_queue: Queue, group: dist.ProcessGroup | None = None):
     while True:
         if send_queue.empty():
             time.sleep(TIMEOUT)
             continue
         dst, root, batch_idx, tensor = send_queue.get()
         serialized = serialize(tensor, root, batch_idx)
-        dist.send(serialized, dst=dst)
+        dist.send(serialized, dst=dst, group=group)
 
 def serialize(tensor: torch.Tensor, *args: int) -> torch.Tensor:
     assert len(args) <= tensor.numel(), "Can't fit metadata in tensor's first dim" # can use all dims later
@@ -150,6 +150,7 @@ def sync_gradients(model: nn.Module, stage_group: dist.ProcessGroup):
 def train(rank: int, world_size: int, num_stages: int, master_host: str, master_port: int):
     # Set seed for reproducibility
     torch.manual_seed(42)
+
     # Initialize store and pg
     store = dist.TCPStore(master_host, master_port, world_size, is_master=rank == 0)
     dist.init_process_group("gloo", rank=rank, world_size=world_size, store=store)
@@ -159,13 +160,23 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     store.set(f"rank{rank}", str(stage))
     rank_to_stage = {rank: int(store.get(f"rank{rank}").decode()) for rank in range(world_size)}
 
-    # Initialize stage groups
-    peers = [r for r, s in rank_to_stage.items() if s == stage]
-    peer_group = dist.new_group(peers, use_local_synchronization=True)
+    # Initialize overlapping stage groups
+    groups = {}
+    for stage1, stage2 in zip(range(num_stages-1), range(1, num_stages)):
+        stage_ranks = [r for r, s in rank_to_stage.items() if s in (stage1, stage2)]
+        groups[(stage1, stage2)] = dist.new_group(stage_ranks)
+
+    # Local peers
+    peers = {}
+    peers["prev"] = groups.get((stage-1, stage), None)
+    peers["self"] = dist.new_group([r for r, s in rank_to_stage.items() if s == stage], use_local_synchronization=True)
+    peers["next"] = groups.get((stage, stage+1), None)
+    tmp = {k: dist.get_process_group_ranks(v) if v is not None else None for k, v in peers.items()}
+    # print(f"[Rank {rank}] Peers: {tmp}")
     dist.barrier()
 
     # Setup
-    max_steps = 100
+    max_steps = 10
     num_samples = 100
     batch_size = 100
     micro_batch_size = 100
@@ -174,7 +185,7 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     assert (num_samples % batch_size) % micro_batch_size == 0, "Last batch size must be divisible by micro batch size"
     model = ShardedModel(Model(hidden_dim=hidden_dim), stage, num_stages)
     dataset = Data(length=num_samples)
-    data_loader = cycle_iter(DataLoader(dataset, batch_size=batch_size, shuffle=False))
+    data_loader = cycle_iter(DataLoader(dataset, batch_size=batch_size, shuffle=True))
 
     # Compute tensor shapes (+metadata)
     shape = (micro_batch_size, hidden_dim) # without metadata
@@ -193,21 +204,20 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     # Start bi-directional communication threads
     forward_send_queue = Queue()
     backward_send_queue = Queue()
-    recv_queue = Queue()
-    # backward_recv_queue = Queue()
-    threading.Thread(target=start_receiving, args=(recv_queue, combined_shape), daemon=True).start()
-    # threading.Thread(target=start_receiving, args=(backward_recv_queue, combined_shape), daemon=True).start()
-    threading.Thread(target=start_sending, args=(forward_send_queue,), daemon=True).start()
-    threading.Thread(target=start_sending, args=(backward_send_queue,), daemon=True).start()
+    forward_recv_queue = Queue()
+    backward_recv_queue = Queue()
+    threading.Thread(target=start_receiving, args=(forward_recv_queue, combined_shape, peers["prev"]), daemon=True).start()
+    threading.Thread(target=start_receiving, args=(backward_recv_queue, combined_shape, peers["next"]), daemon=True).start() # Alternative: just one thread and distingish based on src rank
+    threading.Thread(target=start_sending, args=(forward_send_queue, peers["next"]), daemon=True).start()
+    threading.Thread(target=start_sending, args=(backward_send_queue, peers["prev"]), daemon=True).start()
 
 
     # Initialize optimizer and loss function
-    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
     loss_fn = nn.MSELoss()
     
     # Synchronize all processes
     dist.barrier()
-    history = []
     for step in range(1, max_steps + 1):
         batch = next(data_loader)
         optimizer.zero_grad()
@@ -240,94 +250,81 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
                 output_tensors[(rank, micro_step)] = output_tensor
                 dst = random.choice([r for r, s in rank_to_stage.items() if s == 1])
                 forward_send_queue.put((dst, rank, micro_step, output_tensor))
-                # print(f"[Rank {rank}] Step {step}: Sent activations to rank {dst}")
+                # print(f"[Rank {rank}] Step {step}: Sent activations (Micro Step {micro_step}, Root {rank}, Dst {dst})")
 
             while not (step < int(store.get("step").decode())):
-                if recv_queue.empty():
+                if backward_recv_queue.empty():
+                    time.sleep(TIMEOUT)
                     continue
-                src, root, micro_step, output_tensor_grad = recv_queue.get()
-                # print(f"[Rank {rank}] Step {step}: Got gradients from rank {src} for micro step {micro_step}")
+                src, root, micro_step, output_tensor_grad = backward_recv_queue.get()
+                assert root == rank, "Gradients must have originated at rank"
+                # print(f"[Rank {rank}] Step {step}: Received gradients (Micro Step {micro_step}, Root {root}, Src {src})")
                 model.backward(None, output_tensors[(root, micro_step)], output_tensor_grad)
                 store.add("micro_steps", 1)
 
                 if int(store.get("micro_steps").decode()) == int(store.get("total_micro_steps").decode()):
                     store.set("step", str(step + 1))
-
         elif stage == num_stages - 1: # last stage
-            preds = torch.empty(0, device="cpu")
             batch_loss = torch.tensor(0.0, device="cpu")
             while not (step < int(store.get("step").decode()) ):
-                if recv_queue.empty():
+                if forward_recv_queue.empty():
                     time.sleep(TIMEOUT)
                     continue
-                src, root, micro_step, input_tensor = recv_queue.get()
+                src, root, micro_step, input_tensor = forward_recv_queue.get()
+                # print(f"[Rank {rank}] Step {step}: Received activations (Micro Step {micro_step}, Root {root}, Src {src})")
                 output_tensor = model(hidden_states=input_tensor) # preds for micro_step
                 loss = loss_fn(output_tensor, targets[(root, micro_step)])
+                # print(f"[Rank {rank}] Step {step}: Computed loss")
                 
                 input_tensor_grad = model.backward(input_tensor, loss, None)
                 backward_send_queue.put((src, root, micro_step, input_tensor_grad))
+                # print(f"[Rank {rank}] Step {step}: Sent gradients (Micro Step {micro_step}, Root {root}, Dst {src})")
 
                 batch_loss += loss.detach()
-                preds = torch.cat([preds, output_tensor], dim=0)
 
             # Sum loss across workers and divide by total number of micro batches
-            dist.all_reduce(batch_loss, op=dist.ReduceOp.SUM, group=peer_group)
+            dist.barrier(group=peers["self"])
+            dist.all_reduce(batch_loss, op=dist.ReduceOp.SUM, group=peers["self"])
             batch_loss = batch_loss / total_micro_steps
 
-            # Sync preds and targets
-            targets = torch.cat(target_list, dim=0)
-            history.append((preds.tolist(), targets.tolist(), batch_loss.item()))
-
-            if rank == peers[0]:
+            if rank == dist.get_process_group_ranks(peers["self"])[0]:
                 print(f"Step {step}: Loss: {batch_loss.item()}")
+        else: # middle stages
+            output_tensors = {}
+            while not (step < int(store.get("step").decode())):
+                if forward_recv_queue.empty() and backward_recv_queue.empty():
+                    time.sleep(TIMEOUT)
+                    continue
+                if not forward_recv_queue.empty():
+                    src, root, micro_step, input_tensor = forward_recv_queue.get()
+                    # print(f"[Rank {rank}] Step {step}: Received activations (Micro Step {micro_step}, Root {root}, Src {src})")
+                    output_tensor = model(hidden_states=input_tensor) # preds for micro_step
+                    dst = random.choice([r for r, s in rank_to_stage.items() if s == stage + 1]) # next stage
+                    output_tensors[(root, micro_step)] = (src, input_tensor, output_tensor)
+                    forward_send_queue.put((dst, root, micro_step, output_tensor))
+                    # print(f"[Rank {rank}] Step {step}: Sent activations to rank {dst} (Micro Step {micro_step}, Root {root})")
+                if not backward_recv_queue.empty():
+                    src, root, micro_step, output_tensor_grad = backward_recv_queue.get()
+                    # print(f"[Rank {rank}] Step {step}: Received gradients (Micro Step {micro_step}, Root {root}, Src {src})")
+                    (src, input_tensor, output_tensor) = output_tensors[(root, micro_step)]
+                    input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
+                    backward_send_queue.put((src, root, micro_step, input_tensor_grad))
+                    # print(f"[Rank {rank}] Step {step}: Sent gradients (Micro Step {micro_step}, Root {root}, Dst {src})")
+
 
         # Sync gradients
         # print(f"[Rank {rank}] Syncing gradients for step {step}")
-        sync_gradients(model, peer_group)
+        sync_gradients(model, peers["self"])
 
         # Backward pass
         optimizer.step()
         dist.barrier()
 
-    # Plot the results as an animation
-    if rank == 1:
-        import numpy as np
-        from matplotlib import pyplot as plt
-        fig, ax = plt.subplots()
-        ax.set_xlim(-5, 5)
-        ax.set_ylim(-5, 25)
-        line, = ax.plot([], [], 'r-', label='Predictions')
-        scatter = ax.scatter([], [], c='b', label='Targets')
-        text = ax.text(0.02, 0.95, '', transform=ax.transAxes)
-        ax.legend()
-
-        def animate(frame):
-            preds, targets, loss = history[frame]
-            # Convert to numpy arrays and ensure they're flat
-            preds = np.array(preds).flatten()
-            targets = np.array(targets).flatten()
-            x = np.linspace(-5, 5, len(preds))
-            
-            line.set_data(x, preds)
-            # Create proper 2D array of coordinates for scatter
-            points = np.column_stack((x, targets))
-            scatter.set_offsets(points)
-            
-            ax.set_title(f'Step {frame + 1}')
-            text.set_text(f'Loss: {loss:.4f}')
-            
-            plt.draw() # Force title update
-            return line, scatter, text
-
-        from matplotlib.animation import FuncAnimation
-        anim = FuncAnimation(fig, animate, frames=len(history), interval=200, blit=False) # Set blit=False to allow title updates
-        plt.show()
-
     # Final cleanup
     dist.destroy_process_group()
 
 def main():
-    world_size, num_stages = 3, 2
+    world_size, num_stages = 6, 3
     assert world_size >= num_stages, "World size must be greater than or equal to number of stages"
     master_addr, master_port = "localhost", 29500
     mp.spawn(train, args=(world_size, num_stages, master_addr, master_port), nprocs=world_size, join=True)
