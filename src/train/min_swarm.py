@@ -13,46 +13,41 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 
 TIMEOUT = 0.001 # critical to tune
 
-class Data(Dataset):
+class Data(Dataset): # quadratic function
     def __init__(self, length: int):
-        self.length = length
         self.x = torch.linspace(-5, 5, length).float().reshape(-1, 1).requires_grad_(True)
-        self.y = self.x ** 2 # learn quadratic function
+        self.y = self.x ** 2
 
-    def __len__(self):
-        return self.length
+    def __len__(self) -> int:
+        return len(self.x)
 
-    def __getitem__(self, idx):
-        return {"inputs": self.x[idx], "labels": self.y[idx]}
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        return {"inputs": self.x[idx], "targets": self.y[idx]}
 
-class MicroBatchDataset(Dataset):
+class BatchData(Dataset):
     def __init__(self, batch: Dict[str, torch.Tensor]):
         self.batch = batch
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.batch["inputs"])
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         return {k: v[idx] for k, v in self.batch.items()}
 
 class DistributedSampler(Sampler):
     def __init__(self, dataset: Dataset, rank: int, ranks: List[int], micro_batch_size: int):
-        self.dataset = dataset
-        self.rank = rank
-        self.ranks = ranks
-        self.num_ranks = len(ranks)
+        self.dataset, self.rank, self.ranks, self.micro_batch_size = dataset, rank, ranks, micro_batch_size
+        self.num_ranks, self.num_samples = len(ranks), len(dataset)
         self.idx2rank = {i: rank for i, rank in enumerate(ranks)}
         self.rank2idx = {rank: i for i, rank in enumerate(ranks)}
-        self.micro_batch_size = micro_batch_size
 
     def __len__(self):
-        total_samples = len(self.dataset)
         samples_per_full_round = self.num_ranks * self.micro_batch_size
         
-        full_rounds = total_samples // samples_per_full_round
+        full_rounds = self.num_samples // samples_per_full_round
         samples_from_full_rounds = full_rounds * self.micro_batch_size
         
-        remaining_samples = total_samples % samples_per_full_round
+        remaining_samples = self.num_samples % samples_per_full_round
         rank_start_in_last_round = self.rank2idx[self.rank] * self.micro_batch_size
         remaining_for_rank = max(0, min(self.micro_batch_size, remaining_samples - rank_start_in_last_round))
         
@@ -65,21 +60,21 @@ class DistributedSampler(Sampler):
                 yield idx
 
 class Model(nn.Module):
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim: int, num_layers: int):
         super().__init__()
         self.embed = nn.Linear(1, hidden_dim)
-        self.blocks = nn.ModuleList([
-            nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim))
-            for _ in range(2)
-        ])
+        self.blocks = nn.ModuleList([Model.block(hidden_dim) for _ in range(num_layers)])
         self.head = nn.Linear(hidden_dim, 1)
+    
+    @staticmethod
+    def block(hidden_dim: int) -> nn.Sequential:
+        return nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim))
 
 class ShardedModel(nn.Module):
     def __init__(self, model: nn.Module, stage: int, num_stages: int):
         super().__init__()
+        self.stage, self.num_stages = stage, num_stages
         self.embed = model.embed if stage == 0 else nn.Identity()
-        self.stage = stage
-        self.num_stages = num_stages
         self.blocks = nn.ModuleList([model.blocks[i] for i in self.distribute_layers(len(model.blocks))])
         self.head = model.head if stage == num_stages - 1 else nn.Identity()
         del model
@@ -106,13 +101,7 @@ class SwarmWorld:
     def __init__(self, rank: int, world_size: int, num_stages: int, master_host: str, master_port: int):
         assert world_size >= num_stages, "World size must be at least num stages"
         assert world_size > 1 and num_stages > 1, "Should have more than one worker and stage"
-        self.rank = rank
-        self.world_size = world_size
-        self.num_stages = num_stages
-        self.master_host = master_host
-        self.master_port = master_port
-        self.stage = self._assign_stage(rank)
-        self.pg, self.store = None, None
+        self.rank, self.world_size, self.num_stages, self.master_host, self.master_port = rank, world_size, num_stages, master_host, master_port
 
         # Initialize world structure
         self.ranks2stage = {r: self._assign_stage(r) for r in range(self.world_size)}
@@ -129,30 +118,33 @@ class SwarmWorld:
         # Synchronize world setup
         dist.barrier()
 
+    def get_stage_ranks(self, stage: int) -> List[int]:
+        return self.stage2ranks.get(stage, [])
+
     def setup_step(self, step: int, queries_total: int) -> None:
         self.store.set("step", str(step))
-        self.store.set("queries_done", "0")
-        self.queries_total = queries_total
+        self.store.set("micro_steps_left", str(queries_total))
 
-    def query_done(self) -> None:
-        self.store.add("queries_done", 1)
-        if self.queries_done == self.queries_total:
+    def micro_step_done(self) -> None:
+        self.store.add("micro_steps_left", -1)
+        if self.micro_steps_left == 0:
             self.store.add("step", 1)
 
     def step_done(self, local_step: int) -> bool:
         return local_step < self.step
 
-    def get_stage_ranks(self, stage: int) -> List[int]:
-        return self.stage2ranks.get(stage, [])
+    @property
+    def micro_steps_left(self) -> int:
+        return int(self.store.get(f"micro_steps_left").decode())
 
     @property
     def step(self) -> int:
         return int(self.store.get(f"step").decode())
-        
-    @property
-    def queries_done(self) -> int:
-        return int(self.store.get(f"queries_done").decode())
 
+    @property
+    def stage(self) -> int:
+        return self.ranks2stage[self.rank]
+        
     @property
     def is_master(self) -> bool:
         return self.rank == 0
@@ -188,14 +180,13 @@ Metadata = Tuple[int, int] # (root, local_micro_step)
 SerializedType = torch.Tensor
 DeserializedType = Tuple[torch.Tensor, Metadata]
 
-class Serializer:
+class Serializer: # todo: can improve to by factor O(min(d1, ..., dn)) or using sparse tensors
     def __init__(self, shape: Tuple[int, ...]):
         self.shape = (2, *shape)
 
     def serialize(self, tensor: torch.Tensor, metadata: Metadata) -> SerializedType:
         metadata_tensor = torch.empty(tensor.numel(), device=tensor.device)
-        metadata_tensor[0] = float(metadata[0])
-        metadata_tensor[1] = float(metadata[1])
+        metadata_tensor[0], metadata_tensor[1] = float(metadata[0]), float(metadata[1])
         metadata_tensor = metadata_tensor.reshape(tensor.shape)
         return torch.cat([metadata_tensor.unsqueeze(0), tensor.unsqueeze(0)], dim=0)
 
@@ -208,11 +199,7 @@ class Serializer:
 
 class SwarmComm:
     def __init__(self, model: ShardedModel, world: SwarmWorld, serializer: Serializer, shape: Tuple):
-        self.model = model
-        self.world = world
-        self.serializer = serializer
-        self.shape = shape
-
+        self.model, self.world, self.serializer, self.shape = model, world, serializer, shape
         self.forward_send_queue, self.backward_send_queue = Queue(), Queue()
         self.forward_recv_queue, self.backward_recv_queue = Queue(), Queue()
         threading.Thread(target=self._receive_loop, args=(self.forward_recv_queue, self.shape, self.world.prev_stage_group), daemon=True).start()
@@ -243,8 +230,7 @@ class SwarmComm:
         return src, tensor, metadata
 
     def load_forward_queue(self, local_micro_step: int, input_tensor: torch.Tensor) -> None:
-        metadata = (self.world.rank, local_micro_step)
-        self.forward_recv_queue.put((-1, input_tensor, metadata))
+        self.forward_recv_queue.put((-1, input_tensor, (self.world.rank, local_micro_step)))
 
     def can_receive_forward(self) -> bool:
         return not self.forward_recv_queue.empty()
@@ -287,23 +273,21 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     world = SwarmWorld(rank, world_size, num_stages, master_host, master_port)
 
     # Setup
-    max_steps = 5
-    num_samples = 100
-    batch_size = 100
-    micro_batch_size = 100
-    hidden_dim = 100
+    data_args = {"length": 100}
+    model_args = {"hidden_dim": 100, "num_layers": 2}
+    max_steps, num_samples, batch_size, micro_batch_size = 200, 100, 100, 100
     assert batch_size % micro_batch_size == 0, "Regular batch size must be divisible by micro batch size"
     assert (num_samples % batch_size) % micro_batch_size == 0, "Last batch size must be divisible by micro batch size"
-    model = ShardedModel(Model(hidden_dim=hidden_dim), world.stage, world.num_stages)
-    dataset = Data(length=num_samples)
+    model = ShardedModel(Model(**model_args), world.stage, world.num_stages)
+    dataset = Data(**data_args)
     data_loader = cycle_iter(DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True))
 
     # Initialize optimizer and loss function
-    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4)
     loss_fn = nn.MSELoss()
 
     # Initialize communication
-    shape = (micro_batch_size, hidden_dim)
+    shape = (micro_batch_size, model_args["hidden_dim"])
     serializer = Serializer(shape=shape)
     comm = SwarmComm(model, world, serializer, serializer.shape)
 
@@ -313,19 +297,20 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
         dist.barrier()
 
         # Setup step
-        world.setup_step(step, queries_total=batch_size // micro_batch_size)
+        num_micro_steps = batch_size // micro_batch_size
+        world.setup_step(step, num_micro_steps)
         optimizer.zero_grad()
 
         # Prepare batch batch
         batch = next(data_loader)
-        batch_data = MicroBatchDataset(batch)
+        batch_data = BatchData(batch)
         targets = {} # (rank, local_micro_step) -> micro_batch
         for rank in world.get_stage_ranks(0):
             micro_sampler = DistributedSampler(batch_data, rank=rank, ranks=world.get_stage_ranks(0), micro_batch_size=micro_batch_size)
             micro_dataloader = iter(DataLoader(batch_data, batch_size=micro_batch_size, sampler=micro_sampler, shuffle=False))
             for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
-                if world.is_last_stage: targets[(rank, local_micro_step)] = micro_batch["labels"].detach()
-                elif world.is_first_stage: comm.load_forward_queue(local_micro_step, micro_batch["inputs"])
+                if world.is_last_stage: targets[(rank, local_micro_step)] = micro_batch["targets"].detach()
+                elif world.is_first_stage and rank == world.rank: comm.load_forward_queue(local_micro_step, micro_batch["inputs"])
 
         # Training loop
         batch_loss = torch.tensor(0.0, device="cpu")
@@ -350,15 +335,14 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
                 comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
 
                 if world.is_first_stage: # First stage: Signal to world that query is done
-                    world.query_done()
+                    world.micro_step_done()
 
         # Last stage: Compute batch loss
         if world.is_last_stage:
             comm.sync_loss(batch_loss)
-            batch_loss = batch_loss / world.queries_done
 
             if world.is_leader:
-                print(f"Step {step}: Loss: {batch_loss.item()}")
+                print(f"Step {step}: Loss: {batch_loss.item() / num_micro_steps}")
 
         # Sync and update gradients
         comm.sync_gradients()
@@ -368,7 +352,7 @@ def train(rank: int, world_size: int, num_stages: int, master_host: str, master_
     dist.destroy_process_group()
 
 def main():
-    world_size, num_stages = 2, 2
+    world_size, num_stages = 4, 2
     assert world_size >= num_stages, "World size must be greater than or equal to number of stages"
     master_addr, master_port = "localhost", 29500
     mp.spawn(train, args=(world_size, num_stages, master_addr, master_port), nprocs=world_size, join=True)
