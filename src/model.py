@@ -247,19 +247,15 @@ class ShardedGPT2(GPT2):
         del model
 
     def distribute_layers(self, num_layers):
-        layers_per_gpu = [num_layers // self.world.world_size + (1 if i < num_layers % self.world.world_size else 0) for i in range(self.world.world_size)]
-        start_layer = sum(layers_per_gpu[:self.world.local_rank])
-        return list(range(start_layer, start_layer + layers_per_gpu[self.world.local_rank]))
+        layers_per_gpu = [num_layers // self.world.num_stages + (1 if i < num_layers % self.world.num_stages else 0) for i in range(self.world.num_stages)]
+        start_layer = sum(layers_per_gpu[:self.world.stage])
+        return list(range(start_layer, start_layer + layers_per_gpu[self.world.stage]))
 
-    def forward(self, input_ids: Optional[torch.Tensor] = None, hidden_states: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert input_ids is not None or hidden_states is not None
+    def forward(self, x) -> torch.Tensor:
         if self.world.is_first_stage:
-            x = self.encode_tokens(input_ids)
-        else:
-            x = hidden_states
+            x = self.encode_tokens(x)
         x = self.forward_layers(x)
-        if self.world.is_last_stage:
-            x = self.forward_logits(x)
+        x = self.forward_logits(x)
         return x
 
     def backward(self, input_tensor, output_tensor, output_tensor_grad):

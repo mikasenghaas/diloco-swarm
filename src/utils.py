@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
-from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, SchedulerConfig
+from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, SchedulerConfig, WorldConfig
 from src.logger import CustomLogger
 from src.metrics import Metrics
 from src.world import World
@@ -92,7 +92,6 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool
             "input_ids": batch_input_ids[:, :-1].contiguous(),
             "target_ids": batch_input_ids[:, 1:].contiguous(),
             "attention_mask": batch_attention_mask[:, :-1].contiguous(),
-            "hidden_states": None
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
     return cycle_iter(dataloader) if cycle else iter(dataloader)
