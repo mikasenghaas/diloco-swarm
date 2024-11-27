@@ -14,8 +14,36 @@ from src.logger import Logger, Level
 from src.serializer import Serializer, Metadata, DeserializedType
 
 class Comm:
-    def __init__(self, model: nn.Module, world: World, serializer: Serializer, shape: Tuple, device: torch.device, logger: Logger, timeout: float):
-        self.model, self.world, self.serializer, self.shape, self.device, self.logger, self.timeout = model, world, serializer, shape, device, logger, timeout
+    def __init__(self, world: World, shape: Tuple[int, ...], dtype: torch.dtype, logger: Logger):
+        self.world, self.shape, self.dtype, self.logger = world, shape, dtype, logger
+
+    def send_to(self, tensor: torch.Tensor, dst: int) -> None:
+        dist.send(tensor.detach().clone(), dst=dst)
+
+    def recv_from(self, src: int, device: Optional[torch.device] = None, requires_grad: bool = False) -> torch.Tensor:
+        tensor = torch.empty(self.shape, dtype=self.dtype, requires_grad=requires_grad, device=device)
+        dist.recv(tensor, src=src)
+        return tensor
+
+    def recv_forward(self, device: Optional[torch.device] = None, requires_grad: bool = False) -> torch.Tensor:
+        if self.world.is_first_stage: return None
+        src = self.world.get_stage_ranks(self.world.stage - 1)[0]
+        self.logger.log_message(f"Receiving activations from rank {src}", Level.DEBUG)
+        return self.recv_from(src, device, requires_grad)
+
+    def send_forward(self, tensor: torch.Tensor) -> None:
+        if self.world.is_last_stage: return
+        dst = self.world.get_stage_ranks(self.world.stage + 1)[0]
+        self.logger.log_message(f"Sending activations to rank {dst}", Level.DEBUG)
+        self.send_to(tensor, dst)
+
+    def __repr__(self):
+        return f"Comm(world={self.world}, shape={self.shape}, dtype={self.dtype})"
+
+class SwarmComm(Comm):
+    def __init__(self, world: World, shape: Tuple[int, ...], dtype: torch.dtype, model: nn.Module, serializer: Serializer, device: torch.device, logger: Logger, timeout: float):
+        super().__init__(world, shape, dtype, logger)
+        self.model, self.serializer, self.device, self.timeout = model, serializer, device, timeout
         self.forward_send_queue, self.backward_send_queue = Queue(), Queue()
         self.forward_recv_queue, self.backward_recv_queue = Queue(), Queue()
         threading.Thread(target=self._receive_loop, args=(self.forward_recv_queue, self.shape, self.world.prev_stage_group), daemon=True).start()
