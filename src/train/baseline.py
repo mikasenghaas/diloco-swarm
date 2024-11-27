@@ -18,11 +18,10 @@ from transformers import GPT2Tokenizer
 from datasets import disable_progress_bar
 from tqdm import tqdm
 
-from src.ckpt import Checkpoint
 from src.logger import Level
-from src.world import World
-from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_micro_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype
-from src.metrics import Outputs, Step, Time, MicroTime, Examples, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
+from src.sampler import BatchData
+from src.utils import seed_everything, get_device, get_logger, get_model, get_tokenizer, get_dataset, get_dataloader, get_optimizer, get_scheduler, tokenize, get_train_pbar_description, get_eval_pbar_description, get_num_steps, get_train_setup, format_int, format_float, get_dtype, filter_logits_targets
+from src.metrics import Outputs, Step, Time, MicroTime, Tokens, Norm, Loss, Perplexity, Throughput, LearningRate, Metrics
 from src.config import ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from src.model import GPT2
 from src.config import TrainConfig, SampleConfig
@@ -42,39 +41,23 @@ def train(step: int, model: GPT2, batch_loader: DataLoader, loss_fn: nn.Module, 
     model.to(device)
     model.train()
 
-    # Prepare statistics
-    batch_loss = 0.0
-    batch_tokens, batch_examples = 0, 0
-
-    # Zero-out gradient
+    # Prepare training
     optimizer.zero_grad()
+    batch_loss, batch_tokens = 0.0, 0
     grad_accumulation_steps = len(batch_loader)
     for micro_batch in batch_loader:
         micro_batch = {k: v.to(device) for k, v in micro_batch.items()}
+        # Forward
         with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)):
-            # Forward
             logits = model.forward(input_ids=micro_batch["input_ids"])
-
-            # Reshape logits and targets for loss calculation
-            mask = micro_batch["attention_mask"] # (B, L)
-            logits_flat = logits.view(-1, logits.size(-1))  # (B*L, V)
-            targets_flat = micro_batch["target_ids"].view(-1)  # (B*L)
-            
-            # Apply mask by filtering out padded positions
-            mask_flat = mask.view(-1)  # (B*L)
-            logits_filtered = logits_flat[mask_flat.bool()]  # ((B*L)', V)
-            targets_filtered = targets_flat[mask_flat.bool()]  # ((B*L)')
-            
-            # Calculate loss only on non-padded positions
+            logits_filtered, targets_filtered = filter_logits_targets(logits, micro_batch["target_ids"], micro_batch["attention_mask"])
             loss = loss_fn(logits_filtered, targets_filtered)
-        
-        # Backward with scaled loss
+        # Backward
         loss = loss / grad_accumulation_steps
         loss.backward()
 
         # Compute statistics
         batch_loss += loss.detach().item()
-        batch_examples += micro_batch["input_ids"].shape[0]
         batch_tokens += micro_batch["input_ids"].shape[0] * micro_batch["input_ids"].shape[1]
 
     # Step optimizer and scheduler
@@ -91,7 +74,7 @@ def train(step: int, model: GPT2, batch_loader: DataLoader, loss_fn: nn.Module, 
     step_time = end - start
     micro_step_time = step_time / grad_accumulation_steps
 
-    return Outputs(step=step, lr=lr, loss=batch_loss, num_tokens=batch_tokens, num_examples=batch_examples, norm=norm, time=step_time, micro_step_time=micro_step_time)
+    return Outputs(step=step, lr=lr, loss=batch_loss, tokens=batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time)
 
 def eval(step: int, model: GPT2, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device) -> Outputs:
     # Prepare model
@@ -102,30 +85,20 @@ def eval(step: int, model: GPT2, batch: Dict[str, torch.Tensor], loss_fn: nn.Mod
     # Prepare batch
     batch = {k: v.to(device) for k, v in batch.items() if v is not None}
     with torch.no_grad():
-        # Forward
+        # Forward and filter logits and targets
         logits = model.forward(input_ids=batch["input_ids"])
+        logits_filtered, targets_filtered = filter_logits_targets(logits, batch["target_ids"], batch["attention_mask"])
 
-        # Reshape logits and targets for loss calculation
-        mask = batch["attention_mask"]  # [B, L]
-        logits_flat = logits.view(-1, logits.size(-1))  # [B*L, V]
-        targets_flat = batch["target_ids"].view(-1)  # [B*L]
-        
-        # Apply mask by filtering out padded positions
-        mask_flat = mask.view(-1)  # [B*L]
-        logits_filtered = logits_flat[mask_flat.bool()]  # [(B*L)', V]
-        targets_filtered = targets_flat[mask_flat.bool()]  # [(B*L)']
-        
         # Calculate loss only on non-padded positions
         loss = loss_fn(logits_filtered, targets_filtered)
 
         # Compute statistics
-        num_examples = batch["input_ids"].shape[0]
-        num_tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
+        tokens = batch["input_ids"].shape[0] * batch["input_ids"].shape[1]
 
     end = time.time()
     step_time = end - start
 
-    return Outputs(step=step, loss=loss.item(), num_tokens=num_tokens, num_examples=num_examples, time=step_time)
+    return Outputs(step=step, loss=loss.item(), tokens=tokens, time=step_time)
 
 def sample(model: GPT2, tokenizer: GPT2Tokenizer, config: SampleConfig, device: torch.device) -> List[str]:
     # Prepare model
@@ -155,15 +128,6 @@ def main(config: BaselineConfig):
     device = get_device()
     logger.log_message(f"Using device: {device}")
 
-    # Get world
-    world = World(local_rank=0, world_size=1, device=device)
-    logger.log_world(world)
-
-    if config.logging.ckpt.enable:
-        ckpt = Checkpoint(logger.checkpoint_dir)
-        ckpt.setup(world)
-        logger.log_message(f"Checkpoint directory: {ckpt.base_dir}")
-
     # Load model
     model = get_model(config.model)
     logger.log_message(f"Loaded GPT-2 ({format_int(model.num_parameters(), 2)} parameters)")
@@ -180,14 +144,14 @@ def main(config: BaselineConfig):
     logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
-    seq_length = config.data.seq_length
-    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length+1, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length+1, return_tensors=None), batched=True, num_proc=os.cpu_count())
-    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length+1, return_tensors=None), batched=True, num_proc=os.cpu_count())
+    seq_length = config.data.seq_length + 1
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True)
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True)
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, seq_length, return_tensors=None), batched=True)
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
     
     # Prepare data loaders
-    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=True, cycle=True)
+    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, cycle=True)
     val_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=True, cycle=True)
     test_dataloader = get_dataloader(test_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=True)
     
@@ -220,7 +184,7 @@ def main(config: BaselineConfig):
         logger.log_samples(0, samples)
 
     # Start Training
-    train_metrics = Metrics([Step(), Time(), MicroTime(), Examples(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
+    train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
     eval_metrics = Metrics([Loss(), Perplexity()], name="eval")
 
     # Validate before training
@@ -240,7 +204,8 @@ def main(config: BaselineConfig):
     for train_step in train_bar:
         # Train step
         batch = next(train_dataloader)
-        micro_batchloader = get_micro_dataloader(batch, config.train.micro_batch_size)
+        batch_data = BatchData(batch)
+        micro_batchloader = DataLoader(batch_data, batch_size=config.train.micro_batch_size, shuffle=False)
         outputs = train(train_step, model, micro_batchloader, loss_fn, optimizer, scheduler, config.train, device)
         
         # Compute and log metrics

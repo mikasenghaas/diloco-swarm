@@ -6,14 +6,14 @@ import torch.nn as nn
 import numpy as np
 from dotenv import load_dotenv
 from itertools import cycle as cycle_iter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
-from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, SchedulerConfig, WorldConfig
-from src.logger import CustomLogger
+from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, SchedulerConfig
+from src.logger import Logger
 from src.metrics import Metrics
 from src.world import World
 from src.model import GPT2, ShardedGPT2, GPT2Config
@@ -52,8 +52,8 @@ def get_device(local_rank: Optional[int] = None) -> torch.device:
 def get_dtype(dtype: str) -> torch.dtype:
     return getattr(torch, dtype)
 
-def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> CustomLogger:
-    return CustomLogger(logging, name, run_id)
+def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> Logger:
+    return Logger(logging, name, run_id)
 
 def get_model(model_config: ModelConfig) -> GPT2:
     return GPT2(GPT2Config(**model_config.dict()))
@@ -82,7 +82,10 @@ def get_dataset(data_config: DataConfig, split: str | None = None) -> Dataset:
     datadict = load_dataset(data_config.path, data_config.name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
     if split is None:
         return datadict
-    return datadict[split]
+    dataset = datadict[split]
+    if data_config.subset_size < 1.0:
+        dataset = dataset.select(range(int(len(dataset) * data_config.subset_size)))
+    return dataset
 
 def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -95,27 +98,6 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
     return cycle_iter(dataloader) if cycle else iter(dataloader)
-
-def get_micro_dataloader(batch: Dict[str, torch.Tensor], micro_batch_size: int) -> DataLoader:
-    """Create a DataLoader for micro-batches from a single large batch."""
-    class MicroBatchDataset(Dataset):
-        def __init__(self, input_ids, target_ids, attention_mask):
-            self.input_ids = input_ids
-            self.target_ids = target_ids
-            self.attention_mask = attention_mask
-
-        def __len__(self):
-            return len(self.input_ids)
-
-        def __getitem__(self, idx):
-            return {
-                'input_ids': self.input_ids[idx],
-                'target_ids': self.target_ids[idx],
-                'attention_mask': self.attention_mask[idx],
-            }
-
-    dataset = MicroBatchDataset(batch['input_ids'], batch["target_ids"], batch["attention_mask"])
-    return DataLoader(dataset, batch_size=micro_batch_size, shuffle=False)
 
 def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = None, return_tensors: str | None = "pt") -> Dict[str, Any]:
     if max_length is None:
@@ -175,3 +157,14 @@ def format_int(num: int, prec: int = 2) -> str:
 
 def format_float(num: float, prec: int = 2) -> str:
     return f"{num:.{prec}f}"
+
+def filter_logits_targets(logits: torch.Tensor, target_ids: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    logits_flat = logits.view(-1, logits.size(-1))  # (B*L, V)
+    targets_flat = target_ids.detach().view(-1)  # (B*L)
+    
+    # Apply mask by filtering out padded positions
+    mask_flat = attention_mask.view(-1)  # (B*L)
+    logits_filtered = logits_flat[mask_flat.bool()]  # ((B*L)', V)
+    targets_filtered = targets_flat[mask_flat.bool()]  # ((B*L)')
+
+    return logits_filtered, targets_filtered

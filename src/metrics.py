@@ -7,8 +7,7 @@ class Outputs(BaseModel):
     step: int
     time: float
     loss: float
-    num_tokens: int
-    num_examples: int
+    tokens: int
     lr: float | None = None
     norm: float | None = None
     micro_step_time: float | None = None
@@ -72,33 +71,19 @@ class MicroTime(Metric):
     def reset(self):
         self.times = []
 
-class Examples(Metric):
-    __name__ = "examples"
-    def __init__(self):
-        self.num_examples : List[int] = []
-
-    def update(self, outputs: Outputs):
-        self.num_examples.append(outputs.num_examples)
-
-    def compute(self) -> Dict[str, float]:
-        return {"current": self.num_examples[-1], "total": sum(self.num_examples)}
-
-    def reset(self):
-        self.num_examples = []
-
 class Tokens(Metric):
     __name__ = "tokens"
     def __init__(self):
-        self.num_tokens : List[int] = []
+        self.tokens : List[int] = []
 
     def update(self, outputs: Outputs):
-        self.num_tokens.append(outputs.num_tokens)
+        self.tokens.append(outputs.tokens)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.num_tokens[-1], "total": sum(self.num_tokens)}
+        return {"current": self.tokens[-1], "total": sum(self.tokens)}
 
     def reset(self):
-        self.num_tokens = []
+        self.tokens = []
 
 class Norm(Metric):
     __name__ = "norm"
@@ -148,7 +133,7 @@ class Throughput(Metric):
         self.throughputs : List[float] = []
 
     def update(self, outputs: Outputs):
-        throughput = outputs.num_tokens / outputs.time
+        throughput = outputs.tokens / outputs.time
 
         self.throughputs.append(throughput)
 

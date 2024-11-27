@@ -13,7 +13,7 @@ class BatchData(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         return {k: v[idx] if v is not None else v for k, v in self.batch.items()}
 
-class DistributedSampler(Sampler):
+class BatchSampler(Sampler):
     def __init__(self, dataset: Dataset, rank: int, ranks: List[int], micro_batch_size: int):
         self.dataset, self.rank, self.ranks, self.micro_batch_size = dataset, rank, ranks, micro_batch_size
         self.num_ranks, self.num_samples = len(ranks), len(dataset)

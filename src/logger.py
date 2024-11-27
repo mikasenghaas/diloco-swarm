@@ -16,7 +16,7 @@ class Level(Enum):
     INFO = logging.INFO
     ERROR = logging.ERROR
 
-class CustomLogger:
+class Logger:
     """A logger that logs to console, file, and wandb."""
     def __init__(self, config: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None):
         self.config = config

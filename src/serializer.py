@@ -6,7 +6,7 @@ Metadata = Tuple[int, int] # (root, local_micro_step)
 SerializedType = torch.Tensor
 DeserializedType = Tuple[torch.Tensor, Metadata]
 
-class SwarmSerializer: # todo: can improve to by factor O(min(d1, ..., dn)) or using sparse tensors
+class Serializer: # todo: can improve to by factor O(min(d1, ..., dn)) or using sparse tensors
     def __init__(self, shape: Tuple[int, ...]):
         self.shape = (2, *shape)
 

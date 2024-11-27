@@ -1,64 +1,12 @@
 import os
-import time
-from typing import List
+from typing import List, Literal
 from datetime import datetime
 
-import torch
 import torch.distributed as dist
 
 from src.config import WorldConfig
 
 class World:
-    def __init__(self, local_rank: int, world_size: int, device: torch.device, debug: bool = False):
-        os.environ["OMP_NUM_THREADS"] = "1"
-        self.num_threads = int(os.environ.get("OMP_NUM_THREADS", 1))
-        self.local_rank = local_rank
-        self.world_size = world_size
-        self.device = device
-
-        if world_size > 1 and not debug:
-            dist.init_process_group(backend="nccl", device_id=device)
-            dist.barrier()
-        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    def next_rank(self) -> int:
-        return None if self.local_rank == self.world_size - 1 else (self.local_rank + 1) % self.world_size
-
-    def prev_rank(self) -> int:
-        return None if self.local_rank == 0 else (self.local_rank - 1) % self.world_size
-
-    @property
-    def first_stage(self) -> int:
-        return 0
-
-    @property
-    def last_stage(self) -> int:
-        return self.world_size - 1
-
-    @property
-    def is_first_stage(self) -> bool:
-        return self.local_rank == self.first_stage
-
-    @property
-    def is_last_stage(self) -> bool:
-        return self.local_rank == self.last_stage
-
-    def __repr__(self) -> str:
-        return f"World(local_rank={self.local_rank}, world_size={self.world_size}, is_first_stage={self.is_first_stage}, is_last_stage={self.is_last_stage}, device={self.device})"
-
-    def to_dict(self) -> dict:
-        return {
-            "run_id": self.run_id,
-            "local_rank": self.local_rank,
-            "world_size": self.world_size,
-            "device": self.device,
-        }
-
-    def __iter__(self):
-        for key, value in self.to_dict().items():
-            yield key, value
-
-class SwarmWorld:
     def __init__(self, world: WorldConfig):
         self.local_rank = int(os.environ["LOCAL_RANK"])
         self.rank = int(os.environ["RANK"])
@@ -69,7 +17,7 @@ class SwarmWorld:
         self.num_stages = world.num_stages
 
         assert self.world_size >= self.num_stages, "World size must be at least num stages"
-        assert self.world_size > 1 and self.num_stages > 1, "Should have more than one worker and stage"
+        # assert self.world_size > 1 and self.num_stages > 1, "Should have more than one worker and stage"
 
         # Initialize world structure
         self.ranks2stage = {r: self._assign_stage(r) for r in range(self.world_size)}
@@ -81,14 +29,9 @@ class SwarmWorld:
         self.is_leader = self.rank == self.get_stage_ranks(self.stage)[0]
 
         # Initialize process groups using the same store
-        self.store = dist.TCPStore(
-            host_name=self.master_addr,
-            port=self.master_port+1, # ???
-            world_size=self.world_size,
-            is_master=(self.rank == 0)
-        )
+        self.store = dist.TCPStore(host_name=self.master_addr, port=self.master_port+1, world_size=self.world_size, is_master=(self.rank == 0))
         self.global_pg = dist.init_process_group(backend="gloo", store=self.store, rank=self.rank, world_size=self.world_size)
-        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_id = datetime.now().replace(second=int(datetime.now().second/10)*10).strftime("%Y%m%d_%H%M%S")
         
         # Initialize stage-specific process groups
         self.local_pg = {}
@@ -109,22 +52,23 @@ class SwarmWorld:
     def _assign_stage(self, rank: int) -> int:
         return rank % self.num_stages
 
-    def setup_step(self, step: int, queries_total: int) -> None:
-        self.store.set("step", str(step))
-        self.store.set("micro_steps_left", str(queries_total))
+    def setup_step(self, step: int, num_micro_steps: int, type: Literal["train", "eval", "test"] = "train") -> None:
+        self.store.set(f"{type}_step", str(step))
+        self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
 
-    def micro_step_done(self) -> None:
-        self.store.add("micro_steps_left", -1)
-        if self.micro_steps_left == 0:
-            self.store.add("step", 1)
+    def micro_step_done(self, type: Literal["train", "eval", "test"] = "train") -> None:
+        self.store.add(f"{type}_micro_steps_left", -1)
+        if self.micro_steps_left(type) == 0:
+            self.store.add(f"{type}_step", 1)
 
-    def step_done(self, local_step: int) -> bool:
-        return local_step < self.step
+    def step_done(self, local_step: int, type: Literal["train", "eval", "test"] = "train") -> bool:
+        return local_step < self.step(type)
 
-    @property
-    def micro_steps_left(self) -> int:
-        return int(self.store.get("micro_steps_left").decode())
+    def micro_steps_left(self, type: Literal["train", "eval", "test"] = "train") -> int:
+        return int(self.store.get(f"{type}_micro_steps_left").decode())
 
-    @property
-    def step(self) -> int:
-        return int(self.store.get("step").decode())
+    def step(self, type: Literal["train", "eval", "test"] = "train") -> int:
+        return int(self.store.get(f"{type}_step").decode())
+
+    def __repr__(self) -> str:
+        return f"World(rank={self.rank}, stage={self.stage}, is_first_stage={self.is_first_stage}, is_last_stage={self.is_last_stage}, is_master={self.is_master}, is_leader={self.is_leader})"

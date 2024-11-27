@@ -31,8 +31,8 @@ class SchedulerConfig(BaseConfig):
     last_epoch: int = -1
 
 class AmpConfig(BaseConfig):
-    precision: Literal["highest", "high", "medium"] = "high"
-    dtype: Literal["float32", "float16", "bfloat16"] = "bfloat16"
+    precision: Literal["highest", "high", "medium"] = "highest"
+    dtype: Literal["float32", "float16", "bfloat16"] = "float32"
 
 class TrainConfig(BaseConfig):
     max_steps: int
@@ -66,11 +66,11 @@ class CheckpointingConfig(BaseConfig):
     every_n_steps: int = -1
 
 class ConsoleLoggingConfig(BaseConfig):
-    enable: bool = True
+    enable: bool = False
     log_level: str = "INFO"
 
 class FileLoggingConfig(BaseConfig):
-    enable: bool = False
+    enable: bool = True
     log_level: str = "DEBUG"
 
 class WandbLoggingConfig(BaseConfig):
@@ -94,16 +94,3 @@ class LoggingConfig(BaseConfig):
     file: FileLoggingConfig = FileLoggingConfig()
     wandb: WandbLoggingConfig = WandbLoggingConfig()
     ckpt: CheckpointingConfig = CheckpointingConfig()
-
-if __name__ == "__main__":
-    import yaml
-
-    class TestConfig(BaseConfig):
-        model: ModelConfig
-        data: DataConfig
-        train: TrainConfig
-        eval: EvalConfig
-        logging: LoggingConfig
-
-    config = TestConfig(**parse_argv())
-    print(yaml.dump(config.model_dump(), sort_keys=False))
