@@ -37,11 +37,13 @@ class World:
         self.local_pg = {}
         for stage1, stage2 in zip(range(self.num_stages-1), range(1, self.num_stages)):
             self.local_pg[(stage1, stage2)] = dist.new_group(self.stage2ranks[stage1] + self.stage2ranks[stage2])
+        self.local_pg[(0,self.num_stages-1)] = dist.new_group(self.stage2ranks[0] + self.stage2ranks[self.num_stages-1])
         self.local_pg[self.stage] = dist.new_group(self.stage2ranks[self.stage], use_local_synchronization=True)
         
         self.prev_stage_group = self.local_pg.get((self.stage-1, self.stage), None)
         self.curr_stage_group = self.local_pg[self.stage]
         self.next_stage_group = self.local_pg.get((self.stage, self.stage+1), None)
+        self.first_last_stage_group = self.local_pg[(0, self.num_stages-1)] if self.is_first_stage or self.is_last_stage else None
 
         # Synchronize world setup
         dist.barrier()
@@ -76,16 +78,16 @@ class World:
     def _assign_leader(self, stage: int) -> int:
         return self.stage2ranks[stage][0]
 
-    def setup_step(self, step: int, num_micro_steps: int, type: Literal["train", "eval", "test"] = "train") -> None:
+    def setup_step(self, step: int, num_micro_steps: int, type: Literal["train", "eval", "test", "sample"] = "train") -> None:
         self.store.set(f"{type}_step", str(step))
         self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
 
-    def micro_step_done(self, type: Literal["train", "eval", "test"] = "train") -> None:
+    def micro_step_done(self, type: Literal["train", "eval", "test", "sample"] = "train") -> None:
         self.store.add(f"{type}_micro_steps_left", -1)
         if self.micro_steps_left(type) == 0:
             self.store.add(f"{type}_step", 1)
 
-    def step_done(self, local_step: int, type: Literal["train", "eval", "test"] = "train") -> bool:
+    def step_done(self, local_step: int, type: Literal["train", "eval", "test", "sample"] = "train") -> bool:
         return local_step < self.step(type)
 
     def micro_steps_left(self, type: Literal["train", "eval", "test"] = "train") -> int:

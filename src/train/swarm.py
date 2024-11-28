@@ -23,13 +23,13 @@ from transformers import AutoTokenizer
 from src.logger import Level
 from src.world import World
 from src.serializer import Serializer
-from src.comm import InferenceComm, TrainingComm
+from src.comm import Comm
 from src.sampler import BatchData, BatchSampler
 from src.config import WorldConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
-TIMEOUT = 0.01
+TIMEOUT = 0.001
 LOGGER = None # Global logger
 
 class SwarmConfig(BaseConfig):
@@ -41,7 +41,7 @@ class SwarmConfig(BaseConfig):
     sample: SampleConfig = SampleConfig()
     logging: LoggingConfig = LoggingConfig()
 
-def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: TrainingComm, device: torch.device, config: TrainConfig) -> Outputs:
+def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, device: torch.device, config: TrainConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
@@ -131,7 +131,7 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
     return local_outputs, stage_outputs
 
-def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: TrainingComm) -> Outputs:
+def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: Comm) -> Outputs:
     """Evaluation step on eval batch"""
     # Prepare model
     start = time.time()
@@ -197,7 +197,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
     return outputs, stage_outputs
 
-def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: TrainingComm, device: torch.device, eval_config: EvalConfig) -> Outputs:
+def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: Comm, device: torch.device, eval_config: EvalConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
     eval_range = range(1, eval_config.max_steps + 1)
     eval_bar = tqdm(eval_range, position=1, leave=False if eval_type == "eval" else True) if world.is_leader and world.is_last_stage else None
@@ -213,7 +213,7 @@ def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.
     final_metrics = eval_metrics.compute()
     return final_metrics
 
-def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, activation_comm: InferenceComm, input_ids_comm: InferenceComm, prompt_length: int, config: SampleConfig, device: torch.device) -> List[str]:
+def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: Comm, prompt_length: int, config: SampleConfig, device: torch.device) -> List[str]:
     """Sample loop for generating tokens"""
     model.to(device); model.eval()
 
@@ -221,27 +221,27 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, activa
     tensor_length = prompt_length + config.max_new_tokens
     input_ids = tokenize(config.prompt, tokenizer, max_length=tensor_length)["input_ids"].to(device).repeat(config.num_samples, 1)
     stop_flag = -torch.ones((config.num_samples, tensor_length), device=device, dtype=torch.long)
-    for generated_id in range(prompt_length, tensor_length):
-        if world.is_first_stage and not world.is_last_stage and generated_id > prompt_length:
-            input_ids = input_ids_comm.recv_loop(device=device)
+    comm.load_input_ids_queue(input_ids)
+    for sample_step in range(prompt_length, tensor_length):
+        LOGGER.log_message(f"Sampling token id {sample_step}", Level.DEBUG)
+        if world.is_first_stage:
+            input_ids = comm.recv_input_ids()
             if (input_ids == stop_flag).all(): break
-        hidden_states = activation_comm.recv_forward(device=device)
+        hidden_states = comm.recv_activations()
         output_tensor = model(input_ids, hidden_states)
-        activation_comm.send_forward(output_tensor)
+        comm.send_activations(output_tensor)
 
         if world.is_last_stage:
-            logits = output_tensor[:, generated_id-1, :] / config.temperature # (B, V)
+            logits = output_tensor[:, sample_step-1, :] / config.temperature # (B, V)
             if config.top_k is not None:
                 v, _ = torch.topk(logits, min(config.top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf') # (B, V)
             probs = F.softmax(logits, dim=-1) # (B, V)
             idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
-            input_ids[:, generated_id] = idx_next.squeeze()
-            if tokenizer.eos_token_id is not None and (idx_next == tokenizer.eos_token_id).all():
-                input_ids_comm.send_loop(stop_flag)
-                break
-            if generated_id < tensor_length - 1:
-                input_ids_comm.send_loop(input_ids)
+            input_ids[:, sample_step] = idx_next.squeeze()
+            if (idx_next == tokenizer.eos_token_id).all(): comm.send_input_ids(stop_flag); break
+            if sample_step < tensor_length - 1: comm.send_input_ids(input_ids)
+        dist.barrier()
 
     return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids] if world.is_last_stage and world.is_leader else []
 
@@ -330,19 +330,26 @@ def main(config: SwarmConfig):
     test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
     # Initialize training communication
-    B, L, H = config.train.micro_batch_size, config.data.seq_length, model.config.n_embd
-    serializer = Serializer(shape=(B, L, H))
-    comm = TrainingComm(world, serializer.shape, torch.float32, model, serializer, device, LOGGER, TIMEOUT)
+    activations_shape = None
+    input_ids_shape = None
+    if config.sample.enable:
+        prompt_length = tokenize(config.sample.prompt, tokenizer)["input_ids"].shape[1]
+        activations_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, model.config.n_embd)
+        input_ids_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens)
+
+    serializer = Serializer((config.train.micro_batch_size, config.data.seq_length, model.config.n_embd))
+    comm = Comm(world, serializer.shape, activations_shape, input_ids_shape, torch.float32, model, serializer, device, LOGGER, TIMEOUT)
+    LOGGER.log_message(f"Initialized communication with {comm.world.world_size} processes")
 
     # Sample before training
     if config.sample.enable:
-        prompt_length = tokenize(config.sample.prompt, tokenizer)["input_ids"].shape[1]
-        (B, L) = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens)
-        activation_comm = InferenceComm(world, (B, L, H), torch.float32, LOGGER)
-        input_ids_comm = InferenceComm(world, (B, L), torch.long, LOGGER)
-        samples = sample_loop(model, tokenizer, world, activation_comm, input_ids_comm, prompt_length, config.sample, device)
+        LOGGER.log_message(f"Sampling before training")
+        samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
         LOGGER.log_samples(0, samples)
 
+    return
+    dist.barrier()
+    dist.destroy_process_group()
     return
 
     # Validate before training
