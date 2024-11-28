@@ -47,13 +47,13 @@ class TrainConfig(BaseConfig):
     scheduler: SchedulerConfig = SchedulerConfig()
 
 class EvalConfig(BaseConfig):
-    enable: bool = False
+    enable: bool = True
     every_n_steps: int = -1
     max_epochs: int = 1
     max_steps: int = -1
 
 class SampleConfig(BaseConfig):
-    enable: bool = False
+    enable: bool = True
     every_n_steps: int = -1
     num_samples: int = 5
     prompt: str = "I am"

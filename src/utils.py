@@ -62,7 +62,9 @@ def get_sharded_model(model: GPT2, world: World) -> ShardedGPT2:
     return ShardedGPT2(model, world)
 
 def get_tokenizer() -> AutoTokenizer:
-    return AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=HF_CACHE_DIR)
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=HF_CACHE_DIR)
+    tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 def get_optimizer(model: nn.Module | AutoModelForCausalLM, optimizer_config: OptimizerConfig) -> AdamW:
     return AdamW(model.parameters(), lr=optimizer_config.lr, weight_decay=optimizer_config.weight_decay, betas=optimizer_config.betas)

@@ -1,6 +1,7 @@
 import os
 from typing import List, Literal
 from datetime import datetime
+from collections import defaultdict
 
 import torch.distributed as dist
 
@@ -15,18 +16,17 @@ class World:
         self.master_addr = os.environ["MASTER_ADDR"]
         self.master_port = int(os.environ["MASTER_PORT"])
         self.num_stages = world.num_stages
-
         assert self.world_size >= self.num_stages, "World size must be at least num stages"
-        # assert self.world_size > 1 and self.num_stages > 1, "Should have more than one worker and stage"
 
         # Initialize world structure
-        self.ranks2stage = {r: self._assign_stage(r) for r in range(self.world_size)}
-        self.stage2ranks = {stage: [r for r, s in self.ranks2stage.items() if s == stage] for stage in range(self.num_stages)}
+        self.ranks2stage = defaultdict(lambda: -1, {r: self._assign_stage(r) for r in range(self.world_size)})
+        self.stage2ranks = defaultdict(list, {stage: [r for r, s in self.ranks2stage.items() if s == stage] for stage in range(self.num_stages)})
+        self.stage2leader = defaultdict(lambda: -1, {stage: self._assign_leader(stage) for stage in range(self.num_stages)})
         self.stage = self.ranks2stage[self.rank]
         self.is_first_stage = self.stage == 0
         self.is_last_stage = self.stage == self.num_stages - 1
         self.is_master = self.rank == 0
-        self.is_leader = self.rank == self.get_stage_ranks(self.stage)[0]
+        self.is_leader = self.rank == self.stage2leader[self.stage]
 
         # Initialize process groups using the same store
         self.store = dist.TCPStore(host_name=self.master_addr, port=self.master_port+1, world_size=self.world_size, is_master=(self.rank == 0))
@@ -46,11 +46,35 @@ class World:
         # Synchronize world setup
         dist.barrier()
 
-    def get_stage_ranks(self, stage: int) -> List[int]:
-        return self.stage2ranks.get(stage, [])
+    @property
+    def next_stage_leader(self) -> int:
+        return self.stage2leader[self.stage + 1]
+
+    @property
+    def prev_stage_leader(self) -> int:
+        return self.stage2leader[self.stage - 1]
+
+    @property
+    def first_stage_leader(self) -> int:
+        return self.stage2leader[0]
+
+    @property
+    def last_stage_leader(self) -> int:
+        return self.stage2leader[self.num_stages - 1]
+
+    @property
+    def next_stage_ranks(self) -> List[int]:
+        return self.stage2ranks[self.stage + 1]
+
+    @property
+    def first_stage_ranks(self) -> List[int]:
+        return self.stage2ranks[0]
 
     def _assign_stage(self, rank: int) -> int:
         return rank % self.num_stages
+
+    def _assign_leader(self, stage: int) -> int:
+        return self.stage2ranks[stage][0]
 
     def setup_step(self, step: int, num_micro_steps: int, type: Literal["train", "eval", "test"] = "train") -> None:
         self.store.set(f"{type}_step", str(step))

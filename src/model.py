@@ -251,9 +251,11 @@ class ShardedGPT2(GPT2):
         start_layer = sum(layers_per_gpu[:self.world.stage])
         return list(range(start_layer, start_layer + layers_per_gpu[self.world.stage]))
 
-    def forward(self, x) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, hidden_state: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.world.is_first_stage:
-            x = self.encode_tokens(x)
+            x = self.encode_tokens(input_ids)
+        else:
+            x = hidden_state
         x = self.forward_layers(x)
         x = self.forward_logits(x)
         return x

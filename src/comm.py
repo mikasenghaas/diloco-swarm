@@ -13,47 +13,62 @@ from src.metrics import Outputs
 from src.logger import Logger, Level
 from src.serializer import Serializer, Metadata, DeserializedType
 
-class Comm:
+class InferenceComm:
     def __init__(self, world: World, shape: Tuple[int, ...], dtype: torch.dtype, logger: Logger):
         self.world, self.shape, self.dtype, self.logger = world, shape, dtype, logger
 
-    def send_to(self, tensor: torch.Tensor, dst: int) -> None:
-        dist.send(tensor.detach().clone(), dst=dst)
-
-    def recv_from(self, src: int, device: Optional[torch.device] = None, requires_grad: bool = False) -> torch.Tensor:
-        tensor = torch.empty(self.shape, dtype=self.dtype, requires_grad=requires_grad, device=device)
-        dist.recv(tensor, src=src)
-        return tensor
-
-    def recv_forward(self, device: Optional[torch.device] = None, requires_grad: bool = False) -> torch.Tensor:
-        if self.world.is_first_stage: return None
-        src = self.world.get_stage_ranks(self.world.stage - 1)[0]
-        self.logger.log_message(f"Receiving activations from rank {src}", Level.DEBUG)
-        return self.recv_from(src, device, requires_grad)
-
     def send_forward(self, tensor: torch.Tensor) -> None:
         if self.world.is_last_stage: return
-        dst = self.world.get_stage_ranks(self.world.stage + 1)[0]
-        self.logger.log_message(f"Sending activations to rank {dst}", Level.DEBUG)
-        self.send_to(tensor, dst)
+        self._send_to(tensor, self.world.next_stage_leader)
+
+    def recv_forward(self, device: Optional[torch.device] = None) -> Optional[torch.Tensor]:
+        if self.world.is_first_stage: return None
+        return self._recv_from(self.world.prev_stage_leader, device)
+
+    def recv_loop(self, device: Optional[torch.device] = None) -> Optional[torch.Tensor]:
+        if self.world.is_last_stage: return None
+        return self._recv_from(self.world.last_stage_leader, device)
+
+    def send_loop(self, tensor: torch.Tensor) -> None:
+        if self.world.is_first_stage: return
+        self._send_to(tensor, self.world.first_stage_leader)
+
+    def _send_to(self, tensor: torch.Tensor, dst: int) -> None:
+        self.logger.log_message(f"Sending tensor (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}) to rank {dst}", Level.DEBUG)
+        dist.send(tensor.to("cpu"), dst=dst)
+
+    def _recv_from(self, src: int, device: Optional[torch.device] = None) -> Optional[torch.Tensor]:
+        tensor = torch.empty(self.shape, dtype=self.dtype, device="cpu")
+        self.logger.log_message(f"Waiting to receive tensor (shape={tensor.shape}, dtype={tensor.dtype}, device={device}) from rank {src}", Level.DEBUG)
+        dist.recv(tensor, src=src)
+        self.logger.log_message(f"Received tensor (shape={tensor.shape}, dtype={tensor.dtype}, device={device}) from rank {src}", Level.DEBUG)
+        return tensor.to(device)
 
     def __repr__(self):
         return f"Comm(world={self.world}, shape={self.shape}, dtype={self.dtype})"
 
-class SwarmComm(Comm):
+class TrainingComm(InferenceComm):
+    """Communication for training"""
     def __init__(self, world: World, shape: Tuple[int, ...], dtype: torch.dtype, model: nn.Module, serializer: Serializer, device: torch.device, logger: Logger, timeout: float):
         super().__init__(world, shape, dtype, logger)
         self.model, self.serializer, self.device, self.timeout = model, serializer, device, timeout
         self.forward_send_queue, self.backward_send_queue = Queue(), Queue()
         self.forward_recv_queue, self.backward_recv_queue = Queue(), Queue()
-        threading.Thread(target=self._receive_loop, args=(self.forward_recv_queue, self.shape, self.world.prev_stage_group), daemon=True).start()
-        threading.Thread(target=self._receive_loop, args=(self.backward_recv_queue, self.shape, self.world.next_stage_group), daemon=True).start()
-        threading.Thread(target=self._send_loop, args=(self.forward_send_queue, self.world.next_stage_group), daemon=True).start()
-        threading.Thread(target=self._send_loop, args=(self.backward_send_queue, self.world.prev_stage_group), daemon=True).start()
+        self.send_forward_thread = threading.Thread(target=self._receive_loop, args=(self.forward_recv_queue, self.shape, self.world.prev_stage_group), daemon=True)
+        self.send_backward_thread = threading.Thread(target=self._receive_loop, args=(self.backward_recv_queue, self.shape, self.world.next_stage_group), daemon=True)
+        self.recv_forward_thread = threading.Thread(target=self._send_loop, args=(self.forward_send_queue, self.world.next_stage_group), daemon=True)
+        self.recv_backward_thread = threading.Thread(target=self._send_loop, args=(self.backward_send_queue, self.world.prev_stage_group), daemon=True)
+        self.stop_event = threading.Event()
+
+    def start(self) -> None:
+        self.send_forward_thread.start()
+        self.send_backward_thread.start()
+        self.recv_forward_thread.start()
+        self.recv_backward_thread.start()
 
     def send_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
         if self.world.is_last_stage: return
-        dst = random.choice(self.world.get_stage_ranks(self.world.stage + 1))
+        dst = random.choice(self.world.next_stage_ranks)
         self.forward_send_queue.put((dst, tensor, metadata))
         self.logger.log_message(f"Sent activations (root={metadata[0]}, local_micro_step={metadata[1]}) to rank {dst} {metadata}", Level.DEBUG)
 
