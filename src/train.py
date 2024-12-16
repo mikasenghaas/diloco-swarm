@@ -4,6 +4,7 @@ Simple SWARM Parallel LLM Pre-Training.
 Single GPU:  torchrun --nproc_per_node 1 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 1
 DP: torchrun --nproc_per_node 2 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 1
 PP: torchrun --nproc_per_node 2 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 2
+SWARM: torchrun --nproc_per_node 4 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 2
 """
 import autorootcwd
 
@@ -27,11 +28,11 @@ from src.serializer import Serializer
 from src.comm import Comm
 from src.sampler import BatchData, BatchSampler
 from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
-from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
+from src.utils import seed_everything, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
-TIMEOUT = 0.001
-LOGGER = None
+timeout = 0.001
+logger = None
 
 class SwarmConfig(BaseConfig):
     model: ModelConfig
@@ -70,14 +71,13 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
     # Zero gradients
     optimizer.zero_grad()
-    LOGGER.log_message(f"Starting train step {train_step} (batch_size: {train_config.batch_size}, micro_batch_size: {train_config.micro_batch_size}, num_micro_steps: {num_micro_steps})", Level.DEBUG)
+    logger.log_message(f"Train step {train_step}", Level.DEBUG)
     while True:
         if world.step_done(train_step): break
+        if not comm.can_receive(): time.sleep(timeout); continue
         if comm.can_receive_forward():
             src, input_tensor, (root, local_micro_step) = comm.recv_forward()
-            LOGGER.log_message(f"Forward tensor of shape={input_tensor.shape} and dtype={input_tensor.dtype}", Level.DEBUG)
             output_tensor = model(input_tensor.to(device))
-            LOGGER.log_message(f"Computed output tensor of shape={output_tensor.shape} and dtype={output_tensor.dtype}", Level.DEBUG)
             input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
             comm.send_forward(output_tensor, (root, local_micro_step))
 
@@ -98,26 +98,23 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
                 input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, loss, None)
                 comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
 
-                if world.is_first_stage:
-                    if rank == 0: time.sleep(TIMEOUT)
-                    world.micro_step_done()
+                if world.is_first_stage: world.micro_step_done()
 
         if comm.can_receive_backward():
             _, output_tensor_grad, (root, local_micro_step) = comm.recv_backward()
             src, input_tensor, output_tensor = input_output_tensors[(root, local_micro_step)]
             input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad)
             comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
-
+        
             if world.is_first_stage: world.micro_step_done()
-        time.sleep(TIMEOUT)
-
+        
     # Sync gradients across ranks in same stage
-    LOGGER.log_message(f"Syncing gradients", Level.DEBUG)
+    logger.log_message(f"Syncing gradients", Level.DEBUG)
     if swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0:
         comm.sync_gradients()
     
     # Optimizer steps
-    LOGGER.log_message(f"Step optimizer and scheduler", Level.DEBUG)
+    logger.log_message(f"Step optimizer and scheduler", Level.DEBUG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_norm)
     lr = scheduler.get_last_lr()[0]
     optimizer.step()
@@ -161,7 +158,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     batch_loss, batch_tokens = 0.0, 0
     input_output_tensors = {}
 
-    LOGGER.log_message(f"{eval_type.capitalize()} step {eval_step}", Level.DEBUG)
+    logger.log_message(f"{eval_type.capitalize()} step {eval_step}", Level.DEBUG)
     while not world.step_done(eval_step, type=eval_type):
         if comm.can_receive_forward():
             src, input_tensor, (root, local_micro_step) = comm.recv_forward()
@@ -188,7 +185,6 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
                 batch_loss += loss.detach().item()
                 batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
 
-                LOGGER.log_message(f"{eval_type.capitalize()} micro step done", Level.DEBUG)
                 world.micro_step_done(eval_type)
 
     # Timing
@@ -203,7 +199,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: Comm, device: torch.device, eval_config: EvalConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
     eval_range = range(1, eval_config.max_steps + 1)
-    eval_bar = tqdm(eval_range, position=1, leave=False if eval_type == "eval" else True) if world.is_leader and world.is_last_stage else None
+    eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_leader and world.is_last_stage else None
     eval_metrics.reset()
     for eval_step in eval_range:
         batch = next(eval_dataloader)
@@ -226,8 +222,7 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
     stop_activations = -torch.ones((config.num_samples, tensor_length, model.config.n_embd), device=device, dtype=torch.float32)
     input_ids = tokenize(config.prompt, tokenizer, max_length=tensor_length)["input_ids"].to(device).repeat(config.num_samples, 1)
     comm.load_input_ids_queue(input_ids)
-    for sample_step, generated_id in enumerate(range(prompt_length, tensor_length)):
-        LOGGER.log_message(f"Step {sample_step}: Sampling token {generated_id}", Level.DEBUG)
+    for generated_id in range(prompt_length, tensor_length):
         if world.is_first_stage:
             if not world.is_last_stage:
                 input_ids = comm.recv_input_ids()
@@ -255,28 +250,27 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
     return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids] if world.is_last_stage and world.is_leader else []
 
 def main(config: SwarmConfig):
-    global LOGGER
+    global logger
 
     # Get world
     world = World(config.swarm)
 
     # Get logger
-    logger_name = f"{world.local_rank}" if world.world_size > 1 else "master"
-    LOGGER = get_logger(config.logging, logger_name, world.run_id)
-    LOGGER.log_message(f"Starting process {world.local_rank}", Level.INFO)
-    LOGGER.log_config(config)
-    LOGGER.log_world(world)
+    logger = get_logger(world, config.logging)
+    logger.log_message(f"Starting process {world.local_rank}", Level.INFO, master_only=False)
+    logger.log_config(config)
+    logger.log_world(world)
 
     # Seed everything
     seed_everything(config.train.seed)
-    LOGGER.log_message(f"Seeded everything with {config.train.seed}", Level.INFO)
+    logger.log_message(f"Seeded everything with {config.train.seed}", Level.INFO)
 
     # Set device
     device = get_device(world.local_rank)
     torch.cuda.set_device(world.local_rank)
-    LOGGER.log_message(f"Using device {device}", Level.INFO)
+    logger.log_message(f"Using device {device}", Level.INFO, master_only=False)
 
-    # Get checkpoint
+    # TODO: Initialize checkpoint
     # if config.logging.ckpt.enable:
     #     ckpt = Checkpoint(logger.checkpoint_dir)
     #     ckpt.setup(world)
@@ -284,31 +278,31 @@ def main(config: SwarmConfig):
 
     # Set precision
     torch.set_float32_matmul_precision(config.train.amp.precision)
-    LOGGER.log_message(f"Using precision: {torch.get_float32_matmul_precision()}")
+    logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}")
 
     # Load model and create sharded version
     model = get_model(config.model)
-    LOGGER.log_message(f"Loaded model ({format_int(model.num_parameters(), 2)} parameters)")
+    logger.log_message(f"Loaded model ({format_int(model.num_parameters(), 2)} parameters)")
     
     model = get_sharded_model(model, world)
-    LOGGER.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)")
+    logger.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)", master_only=False)
 
     # Load tokenizer
     tokenizer = get_tokenizer()
-    LOGGER.log_message(f"Loaded tokenizer ({format_int(len(tokenizer), 0)} vocab size)")
+    logger.log_message(f"Loaded tokenizer ({format_int(len(tokenizer), 0)} vocab size)")
 
     # Load
     train_data = get_dataset(config.data, split="train")
     val_data = get_dataset(config.data, split="validation")
     test_data = get_dataset(config.data, split="test")
-    LOGGER.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
+    logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Prepare dataset
     seq_length = config.data.seq_length + 1
     train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
     val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
     test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
-    LOGGER.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
+    logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
 
     # Setup training
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, cycle=True)
@@ -324,9 +318,9 @@ def main(config: SwarmConfig):
     train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
     eval_setup = get_train_setup(num_eval_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
     test_setup = get_train_setup(num_test_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(test_data))
-    LOGGER.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]))
-    LOGGER.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
-    LOGGER.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]))
+    logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]))
+    logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
+    logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]))
 
     # Get optimizer and scheduler
     optimizer = get_optimizer(model, config.train.optimizer)
@@ -346,23 +340,22 @@ def main(config: SwarmConfig):
         input_ids_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens)
 
     serializer = Serializer((config.train.micro_batch_size, config.data.seq_length, model.config.n_embd))
-    comm = Comm(world, serializer.shape, activations_shape, input_ids_shape, torch.float32, model, serializer, device, LOGGER, TIMEOUT)
+    comm = Comm(world, serializer.shape, activations_shape, input_ids_shape, torch.float32, model, serializer, device, logger, timeout) # Sample before training
 
     # Sample before training
     if config.sample.enable:
-        LOGGER.log_message(f"Sampling before training")
         samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
-        LOGGER.log_samples(samples, step=0)
+        logger.log_samples(samples, step=0)
 
     # Validate before training
     if config.eval.enable:
         outputs = eval_loop("eval", model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
-        if world.is_leader and world.is_last_stage:
-            LOGGER.log_metrics(outputs, level=Level.DEBUG, step=0)
+        logger.log_metrics(outputs, level=Level.DEBUG, step=0)
 
     # Training loop
+    logger.log_message(f"Starting training")
     train_range = range(1, num_train_steps + 1)
-    train_bar = tqdm(train_range, position=0, leave=True) if world.is_leader and world.is_last_stage else None
+    train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for train_step in train_range:
         batch = next(train_dataloader)
         _, stage_outputs = train(train_step, model, batch, loss_fn, optimizer, scheduler, world, comm, device, config.swarm, config.train)
@@ -371,36 +364,34 @@ def main(config: SwarmConfig):
         if world.is_leader and world.is_last_stage:
             train_metrics.update(stage_outputs)
             curr_metrics = train_metrics.compute()
-            LOGGER.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
+            logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
             train_bar.set_description(get_train_pbar_description(train_metrics, prefix="[TRAIN]"))
             train_bar.update()
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
             outputs = eval_loop("eval", model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
-            if world.is_leader and world.is_last_stage:
-                LOGGER.log_metrics(outputs, level=Level.DEBUG, step=train_step)
+            logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
             samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
-            LOGGER.log_samples(samples, step=train_step)
+            logger.log_samples(samples, step=train_step)
 
         # TODO: Implement checkpointing
         # if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
         #     ckpt_dir = ckpt.save(train_step, model)
         #     logger.log_message(f"Saved model checkpoint at {ckpt_dir}")
 
-    # Sample
-    if config.sample.enable:
-        samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
-        LOGGER.log_samples(samples, step=train_step)
-
     # Test
     if config.eval.enable:
         outputs = eval_loop("test", model, loss_fn, test_dataloader, test_metrics, world, comm, device, config.eval)
-        if world.is_leader and world.is_last_stage:
-            LOGGER.log_metrics(outputs, level=Level.DEBUG, step=train_step)
+        logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
+
+    # Sample
+    if config.sample.enable:
+        samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
+        logger.log_samples(samples, step=train_step)
 
     # Cleanup
     dist.barrier()

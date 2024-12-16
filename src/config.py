@@ -62,16 +62,10 @@ class SampleConfig(BaseConfig):
     temperature : float = 1.0
     top_k : int | None = 20
 
-class CheckpointingConfig(BaseConfig):
-    enable: bool = False
-    every_n_steps: int = -1
-
 class ConsoleLoggingConfig(BaseConfig):
-    enable: bool = False
     log_level: str = "INFO"
 
 class FileLoggingConfig(BaseConfig):
-    enable: bool = True
     log_level: str = "DEBUG"
 
 class WandbLoggingConfig(BaseConfig):
@@ -89,9 +83,13 @@ class WandbLoggingConfig(BaseConfig):
             return v.split(',')
         return v
 
+# class CheckpointingConfig(BaseConfig):
+#     enable: bool = False
+#     every_n_steps: int = -1
+
 class LoggingConfig(BaseConfig):
     log_dir: str = "logs"
     console: ConsoleLoggingConfig = ConsoleLoggingConfig()
     file: FileLoggingConfig = FileLoggingConfig()
     wandb: WandbLoggingConfig = WandbLoggingConfig()
-    ckpt: CheckpointingConfig = CheckpointingConfig()
+    # ckpt: CheckpointingConfig = CheckpointingConfig()

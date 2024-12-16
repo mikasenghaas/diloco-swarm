@@ -6,7 +6,7 @@ import torch.nn as nn
 import numpy as np
 from dotenv import load_dotenv
 from itertools import cycle as cycle_iter
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -36,24 +36,14 @@ def get_persistent_dir() -> str | None:
 
 HF_CACHE_DIR = os.path.join(get_persistent_dir(), "huggingface")
 
-def get_world() -> Tuple[int, int]:
-    msg = "Try running with `torchrun --nproc_per_node <num_gpus> <script>.py`"
-    assert "LOCAL_RANK" in os.environ and "WORLD_SIZE" in os.environ, f"LOCAL_RANK and WORLD_SIZE environment variable is not set. {msg}"
-    local_rank = int(os.getenv("LOCAL_RANK"))
-    world_size = int(os.getenv("WORLD_SIZE"))
-    return local_rank, world_size
-
 def get_device(local_rank: Optional[int] = None) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda", local_rank)
     else:
         raise RuntimeError("No CUDA device available.")
 
-def get_dtype(dtype: str) -> torch.dtype:
-    return getattr(torch, dtype)
-
-def get_logger(logging: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None) -> Logger:
-    return Logger(logging, name, run_id)
+def get_logger(world: World, logging: LoggingConfig) -> Logger:
+    return Logger(world, logging)
 
 def get_model(model_config: ModelConfig) -> GPT2:
     return GPT2(GPT2Config(**model_config.dict()))
@@ -140,6 +130,7 @@ def get_train_setup(steps: int, batch_size: int, seq_length: int, micro_batch_si
     return {
         "steps": steps,
         "batch_size": batch_size,
+        "seq_length": seq_length,
         "micro_batch_size": micro_batch_size,
         "tokens_per_step": tokens_per_step,
         "total_tokens": total_tokens,
