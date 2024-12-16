@@ -1,9 +1,9 @@
 """
 Simple SWARM Parallel LLM Pre-Training.
 
-Single GPU:  torchrun --nproc_per_node 1 src/train/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 1
-DP: torchrun --nproc_per_node 2 src/train/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 1
-PP: torchrun --nproc_per_node 2 src/train/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 2
+Single GPU:  torchrun --nproc_per_node 1 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 1
+DP: torchrun --nproc_per_node 2 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 1
+PP: torchrun --nproc_per_node 2 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 2
 """
 import autorootcwd
 
