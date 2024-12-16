@@ -17,7 +17,7 @@ class Level(Enum):
     ERROR = logging.ERROR
 
 class Logger:
-    """A logger that logs to console, file, and wandb."""
+    """Automatically log to console, file, and wandb based on world configuration."""
     def __init__(self, config: LoggingConfig, name: Optional[str] = None, run_id: Optional[str] = None):
         self.config = config
         self.console_logger = None
@@ -85,14 +85,14 @@ class Logger:
     def log_world(self, world: World, level: Level = Level.INFO) -> None:
         self.log_message(world, level=level)
         if self.wandb_run:
-            wandb.config.update({"world": dict(world)})
+            wandb.config.update({"world": dict(world)}, allow_val_change=True)
 
     def log_metrics(self, metrics: Dict[str, float], step: int | None = None, level: Level = Level.INFO) -> None:
         self.log_message(metrics, level=level)
         if self.wandb_run:
             wandb.log(metrics, step=step)
 
-    def log_samples(self, step: int, samples: List[str], level: Level = Level.INFO) -> None:
+    def log_samples(self, samples: List[str], step: int, level: Level = Level.INFO) -> None:
         for i, sample in enumerate(samples):
             self.log_message(f"Sample {i+1}: {sample}", level=level)
 

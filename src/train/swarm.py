@@ -57,9 +57,8 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     # Prepare batch batch
     batch_data = BatchData(batch)
     micro_batches = {} # (rank, local_micro_step) -> micro_batch
-    first_stage_ranks = world.get_stage_ranks(0)
-    for rank in first_stage_ranks:
-        micro_sampler = BatchSampler(batch_data, rank=rank, ranks=first_stage_ranks, micro_batch_size=config.micro_batch_size)
+    for rank in world.first_stage_ranks:
+        micro_sampler = BatchSampler(batch_data, rank=rank, ranks=world.first_stage_ranks, micro_batch_size=config.micro_batch_size)
         micro_dataloader = DataLoader(batch_data, batch_size=config.micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
             if world.is_last_stage: micro_batches[(rank, local_micro_step)] = micro_batch
@@ -76,7 +75,9 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
         if world.step_done(train_step): break
         if comm.can_receive_forward():
             src, input_tensor, (root, local_micro_step) = comm.recv_forward()
+            LOGGER.log_message(f"Forward tensor of shape={input_tensor.shape} and dtype={input_tensor.dtype}", Level.DEBUG)
             output_tensor = model(input_tensor.to(device))
+            LOGGER.log_message(f"Computed output tensor of shape={output_tensor.shape} and dtype={output_tensor.dtype}", Level.DEBUG)
             input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
             comm.send_forward(output_tensor, (root, local_micro_step))
 
@@ -220,30 +221,35 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
 
     # Prepare input and generate output
     tensor_length = prompt_length + config.max_new_tokens
+    stop_input_ids = -torch.ones((config.num_samples, tensor_length), device=device, dtype=torch.long)
+    stop_activations = -torch.ones((config.num_samples, tensor_length, model.config.n_embd), device=device, dtype=torch.float32)
     input_ids = tokenize(config.prompt, tokenizer, max_length=tensor_length)["input_ids"].to(device).repeat(config.num_samples, 1)
-    stop_flag = -torch.ones((config.num_samples, tensor_length), device=device, dtype=torch.long)
     comm.load_input_ids_queue(input_ids)
-    for sample_step in range(prompt_length, tensor_length):
-        LOGGER.log_message(f"Sampling token id {sample_step}", Level.DEBUG)
+    for sample_step, generated_id in enumerate(range(prompt_length, tensor_length)):
+        LOGGER.log_message(f"Step {sample_step}: Sampling token {generated_id}", Level.DEBUG)
         if world.is_first_stage:
             if not world.is_last_stage:
                 input_ids = comm.recv_input_ids()
-            if (input_ids == stop_flag).all(): break
-        hidden_states = comm.recv_activations()
-        output_tensor = model(input_ids, hidden_states)
+                if (input_ids == stop_input_ids).all(): comm.send_activations(stop_activations); break
+            output_tensor = model(input_ids)
+        else:
+            hidden_states = comm.recv_activations()
+            if (hidden_states == stop_activations).all(): break
+            output_tensor = model(hidden_states)
         comm.send_activations(output_tensor)
 
         if world.is_last_stage:
-            logits = output_tensor[:, sample_step-1, :] / config.temperature # (B, V)
+            logits = output_tensor[:, generated_id-1, :] / config.temperature # (B, V)
             if config.top_k is not None:
                 v, _ = torch.topk(logits, min(config.top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf') # (B, V)
             probs = F.softmax(logits, dim=-1) # (B, V)
-            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
-            input_ids[:, sample_step] = idx_next.squeeze()
-            if (idx_next == tokenizer.eos_token_id).all(): comm.send_input_ids(stop_flag); break
-            if sample_step < tensor_length - 1: comm.send_input_ids(input_ids)
-        dist.barrier()
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1),
+            input_ids[:, generated_id] = idx_next.squeeze()
+            if (idx_next == tokenizer.eos_token_id).all():
+                comm.send_input_ids(stop_input_ids)
+                if world.is_first_stage: break
+            if generated_id < tensor_length - 1: comm.send_input_ids(input_ids)
 
     return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids] if world.is_last_stage and world.is_leader else []
 
@@ -332,8 +338,7 @@ def main(config: SwarmConfig):
     test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
     # Initialize training communication
-    activations_shape = None
-    input_ids_shape = None
+    activations_shape, input_ids_shape = None, None
     if config.sample.enable:
         prompt_length = tokenize(config.sample.prompt, tokenizer)["input_ids"].shape[1]
         activations_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, model.config.n_embd)
@@ -341,18 +346,12 @@ def main(config: SwarmConfig):
 
     serializer = Serializer((config.train.micro_batch_size, config.data.seq_length, model.config.n_embd))
     comm = Comm(world, serializer.shape, activations_shape, input_ids_shape, torch.float32, model, serializer, device, LOGGER, TIMEOUT)
-    LOGGER.log_message(f"Initialized communication with {comm.world.world_size} processes")
 
     # Sample before training
     if config.sample.enable:
         LOGGER.log_message(f"Sampling before training")
         samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
-        LOGGER.log_samples(0, samples)
-
-    return
-    dist.barrier()
-    dist.destroy_process_group()
-    return
+        LOGGER.log_samples(samples, step=0)
 
     # Validate before training
     if config.eval.enable:
@@ -383,18 +382,18 @@ def main(config: SwarmConfig):
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
-            samples = sample_loop(model, tokenizer, world, activation_comm, input_ids_comm, prompt_length, config.sample, device)
-            LOGGER.log_samples(train_step, samples)
+            samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
+            LOGGER.log_samples(samples, step=train_step)
 
-        # Checkpoint
+        # TODO: Implement checkpointing
         # if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
         #     ckpt_dir = ckpt.save(train_step, model)
         #     logger.log_message(f"Saved model checkpoint at {ckpt_dir}")
 
     # Sample
     if config.sample.enable:
-        samples = sample_loop(model, tokenizer, world, activation_comm, input_ids_comm, prompt_length, config.sample, device)
-        LOGGER.log_samples(train_step, samples)
+        samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
+        LOGGER.log_samples(samples, step=train_step)
 
     # Test
     if config.eval.enable:
@@ -403,6 +402,7 @@ def main(config: SwarmConfig):
             LOGGER.log_metrics(outputs, level=Level.DEBUG, step=train_step)
 
     # Cleanup
+    dist.barrier()
     dist.destroy_process_group()
 
 if __name__ == "__main__":

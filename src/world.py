@@ -1,5 +1,5 @@
 import os
-from typing import List, Literal
+from typing import List, Literal, Dict, Any, Iterator
 from datetime import datetime
 from collections import defaultdict
 
@@ -65,12 +65,12 @@ class World:
         return self.stage2leader[self.num_stages - 1]
 
     @property
-    def next_stage_ranks(self) -> List[int]:
-        return self.stage2ranks[self.stage + 1]
+    def has_next_stage(self) -> bool:
+        return self.stage2ranks[self.stage + 1] != []
 
     @property
-    def has_next_stage(self) -> bool:
-        return self.next_stage_ranks != []
+    def has_prev_stage(self) -> bool:
+        return self.stage2ranks[self.stage - 1] != []
 
     @property
     def first_stage_ranks(self) -> List[int]:
@@ -102,3 +102,19 @@ class World:
 
     def __repr__(self) -> str:
         return f"World(rank={self.rank}, stage={self.stage}, is_first_stage={self.is_first_stage}, is_last_stage={self.is_last_stage}, is_master={self.is_master}, is_leader={self.is_leader})"
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self.__dict__().items())
+
+    def __dict__(self) -> Dict[str, Any]:
+        return {
+            "local_rank": self.local_rank,
+            "rank": self.rank,
+            "local_world_size": self.local_world_size,
+            "world_size": self.world_size,
+            "master_addr": self.master_addr,
+            "master_port": self.master_port,
+            "num_stages": self.num_stages,
+            "is_master": self.is_master,
+            "is_leader": self.is_leader
+        }

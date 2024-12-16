@@ -251,14 +251,10 @@ class ShardedGPT2(GPT2):
         start_layer = sum(layers_per_gpu[:self.world.stage])
         return list(range(start_layer, start_layer + layers_per_gpu[self.world.stage]))
 
-    def forward(self, input_ids: torch.Tensor, hidden_state: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if self.world.is_first_stage:
-            x = self.encode_tokens(input_ids)
-        else:
-            x = hidden_state
+    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        x = self.encode_tokens(input_tensor) if input_tensor.dtype == torch.int64 else input_tensor
         x = self.forward_layers(x)
-        x = self.forward_logits(x)
-        return x
+        return self.forward_logits(x)
 
     def backward(self, input_tensor, output_tensor, output_tensor_grad):
         if input_tensor is not None: input_tensor.retain_grad()
