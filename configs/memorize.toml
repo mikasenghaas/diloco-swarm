@@ -1,0 +1,14 @@
+[data]
+seq_length = 128
+subset_size = 1
+
+[train]
+max_steps = 100
+batch_size = 1
+micro_batch_size = 1
+
+[eval]
+enable = false
+
+[logging.wandb]
+enable = false

@@ -9,6 +9,5 @@ micro_batch_size = 16
 max_norm = 1000.0 # Disable gradient clipping (for debugging PP)
 
 [eval]
-enable = false
 every_n_steps = 5
 max_steps = 5
