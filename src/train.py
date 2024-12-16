@@ -26,23 +26,23 @@ from src.world import World
 from src.serializer import Serializer
 from src.comm import Comm
 from src.sampler import BatchData, BatchSampler
-from src.config import WorldConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
+from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from src.utils import seed_everything, get_world, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
 TIMEOUT = 0.001
-LOGGER = None # Global logger
+LOGGER = None
 
 class SwarmConfig(BaseConfig):
     model: ModelConfig
     data: DataConfig
     train: TrainConfig
-    world: WorldConfig = WorldConfig()
+    swarm: SwarmConfig = SwarmConfig()
     eval: EvalConfig = EvalConfig()
     sample: SampleConfig = SampleConfig()
     logging: LoggingConfig = LoggingConfig()
 
-def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, device: torch.device, config: TrainConfig) -> Outputs:
+def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, device: torch.device, swarm_config: SwarmConfig, train_config: TrainConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
@@ -51,15 +51,15 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     optimizer.zero_grad()
 
     # Setup step
-    num_micro_steps = config.batch_size // config.micro_batch_size
+    num_micro_steps = train_config.batch_size // train_config.micro_batch_size
     world.setup_step(train_step, num_micro_steps=num_micro_steps)
 
     # Prepare batch batch
     batch_data = BatchData(batch)
     micro_batches = {} # (rank, local_micro_step) -> micro_batch
     for rank in world.first_stage_ranks:
-        micro_sampler = BatchSampler(batch_data, rank=rank, ranks=world.first_stage_ranks, micro_batch_size=config.micro_batch_size)
-        micro_dataloader = DataLoader(batch_data, batch_size=config.micro_batch_size, shuffle=False, sampler=micro_sampler)
+        micro_sampler = BatchSampler(batch_data, rank=rank, ranks=world.first_stage_ranks, micro_batch_size=train_config.micro_batch_size)
+        micro_dataloader = DataLoader(batch_data, batch_size=train_config.micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
             if world.is_last_stage: micro_batches[(rank, local_micro_step)] = micro_batch
             if world.is_first_stage and rank == world.rank: comm.load_forward_queue(local_micro_step, micro_batch["input_ids"])
@@ -70,7 +70,7 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
     # Zero gradients
     optimizer.zero_grad()
-    LOGGER.log_message(f"Starting train step {train_step} (batch_size: {config.batch_size}, micro_batch_size: {config.micro_batch_size}, num_micro_steps: {num_micro_steps})", Level.DEBUG)
+    LOGGER.log_message(f"Starting train step {train_step} (batch_size: {train_config.batch_size}, micro_batch_size: {train_config.micro_batch_size}, num_micro_steps: {num_micro_steps})", Level.DEBUG)
     while True:
         if world.step_done(train_step): break
         if comm.can_receive_forward():
@@ -113,11 +113,12 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
     # Sync gradients across ranks in same stage
     LOGGER.log_message(f"Syncing gradients", Level.DEBUG)
-    s = time.time(); comm.sync_gradients()
+    if swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0:
+        comm.sync_gradients()
     
     # Optimizer steps
     LOGGER.log_message(f"Step optimizer and scheduler", Level.DEBUG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_norm)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_norm)
     lr = scheduler.get_last_lr()[0]
     optimizer.step()
     scheduler.step()
@@ -206,7 +207,7 @@ def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.
     eval_metrics.reset()
     for eval_step in eval_range:
         batch = next(eval_dataloader)
-        _, stage_outputs = eval(eval_step, eval_type, model, batch, loss_fn, device, world, comm, TIMEOUT)
+        _, stage_outputs = eval(eval_step, eval_type, model, batch, loss_fn, device, world, comm)
         eval_metrics.update(stage_outputs)
         
         if not (world.is_leader and world.is_last_stage): continue
@@ -257,7 +258,7 @@ def main(config: SwarmConfig):
     global LOGGER
 
     # Get world
-    world = World(config.world)
+    world = World(config.swarm)
 
     # Get logger
     logger_name = f"{world.local_rank}" if world.world_size > 1 else "master"
@@ -364,7 +365,7 @@ def main(config: SwarmConfig):
     train_bar = tqdm(train_range, position=0, leave=True) if world.is_leader and world.is_last_stage else None
     for train_step in train_range:
         batch = next(train_dataloader)
-        _, stage_outputs = train(train_step, model, batch, loss_fn, optimizer, scheduler, world, comm, device, config.train)
+        _, stage_outputs = train(train_step, model, batch, loss_fn, optimizer, scheduler, world, comm, device, config.swarm, config.train)
 
         # Update metrics
         if world.is_leader and world.is_last_stage:

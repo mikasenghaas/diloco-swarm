@@ -5,17 +5,17 @@ from collections import defaultdict
 
 import torch.distributed as dist
 
-from src.config import WorldConfig
+from src.config import SwarmConfig
 
 class World:
-    def __init__(self, world: WorldConfig):
+    def __init__(self, swarm: SwarmConfig):
         self.local_rank = int(os.environ["LOCAL_RANK"])
         self.rank = int(os.environ["RANK"])
         self.local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
         self.world_size = int(os.environ["WORLD_SIZE"])
         self.master_addr = os.environ["MASTER_ADDR"]
         self.master_port = int(os.environ["MASTER_PORT"])
-        self.num_stages = world.num_stages
+        self.num_stages = swarm.num_stages
         assert self.world_size >= self.num_stages, "World size must be at least num stages"
 
         # Initialize world structure

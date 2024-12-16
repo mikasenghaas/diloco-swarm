@@ -19,7 +19,7 @@ for MICRO_BATCH_SIZE in "${MICRO_BATCH_SIZES[@]}"
 do
     torchrun --nproc_per_node 1 src/train.py \
         @configs/benchmark.toml \
-        --world.num_stages 1 \
+        --swarm.num_stages 1 \
         --model @configs/model/gpt2-small.toml \
         --data @configs/data/wikitext.toml \
         --train.micro_batch_size $MICRO_BATCH_SIZE \
@@ -31,7 +31,7 @@ done
 # do
 #     torchrun --nproc_per_node 2 src/train.py \
 #         @configs/benchmark.toml \
-#         --world.num_stages 1 \
+#         --swarm.num_stages 1 \
 #         --model @configs/model/gpt2-small.toml \
 #         --data @configs/data/wikitext.toml \
 #         --train.micro_batch_size $MICRO_BATCH_SIZE \
@@ -43,7 +43,7 @@ done
 # do
 #     torchrun --nproc_per_node 2 src/train.py \
 #         @configs/benchmark.toml \
-#         --world.num_stages 2 \
+#         --swarm.num_stages 2 \
 #         --model @configs/model/gpt2-small.toml \
 #         --data @configs/data/wikitext.toml \
 #         --train.micro_batch_size $MICRO_BATCH_SIZE \

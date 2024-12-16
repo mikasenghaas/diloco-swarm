@@ -2,8 +2,9 @@ from typing import Literal, List
 from pydantic_config import BaseConfig, parse_argv
 from pydantic import field_validator
 
-class WorldConfig(BaseConfig):
+class SwarmConfig(BaseConfig):
     num_stages: int = 2
+    sync_every_n_steps: int = 1
 
 class ModelConfig(BaseConfig):
     n_layer: int

@@ -6,7 +6,7 @@ TAGS="Memorize"
 # Single GPU
 torchrun --nproc_per_node 1 src/train.py \
     @configs/memorize.toml \
-    --world.num_stages 1 \
+    --swarm.num_stages 1 \
     --model @configs/model/gpt2-small.toml \
     --data @configs/data/memorize.toml \
     --logging.wandb.tags "$TAGS,Single-GPU"
@@ -14,7 +14,7 @@ torchrun --nproc_per_node 1 src/train.py \
 # DP
 torchrun --nproc_per_node 2 src/train.py \
     @configs/memorize.toml \
-    --world.num_stages 1 \
+    --swarm.num_stages 1 \
     --model @configs/model/gpt2-small.toml \
     --data @configs/data/memorize.toml \
     --logging.wandb.tags "$TAGS,DP"
@@ -22,7 +22,7 @@ torchrun --nproc_per_node 2 src/train.py \
 # PP
 torchrun --nproc_per_node 2 src/train.py \
     @configs/memorize.toml \
-    --world.num_stages 2 \
+    --swarm.num_stages 2 \
     --model @configs/model/gpt2-small.toml \
     --data @configs/data/memorize.toml \
     --logging.wandb.tags "$TAGS,PP"
