@@ -37,7 +37,7 @@ class World:
         self.local_pg = {}
         for stage1, stage2 in zip(range(self.num_stages-1), range(1, self.num_stages)):
             self.local_pg[(stage1, stage2)] = dist.new_group(self.stage2ranks[stage1] + self.stage2ranks[stage2])
-        self.local_pg[(0,self.num_stages-1)] = dist.new_group(self.stage2ranks[0] + self.stage2ranks[self.num_stages-1])
+        self.local_pg[(0,self.num_stages-1)] = dist.new_group(list(set(self.stage2ranks[0] + self.stage2ranks[self.num_stages-1])))
         self.local_pg[self.stage] = dist.new_group(self.stage2ranks[self.stage], use_local_synchronization=True)
         
         self.prev_stage_group = self.local_pg.get((self.stage-1, self.stage), None)
@@ -67,6 +67,10 @@ class World:
     @property
     def next_stage_ranks(self) -> List[int]:
         return self.stage2ranks[self.stage + 1]
+
+    @property
+    def has_next_stage(self) -> bool:
+        return self.next_stage_ranks != []
 
     @property
     def first_stage_ranks(self) -> List[int]:

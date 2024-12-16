@@ -1,8 +1,9 @@
 """
 Simple SWARM Parallel LLM Pre-Training.
 
-torchrun --nproc_per_node 1 src/train/swarm.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 1
-torchrun --nproc_per_node 2 src/train/swarm.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 2
+Single GPU:  torchrun --nproc_per_node 1 src/train/swarm.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 1
+DP: torchrun --nproc_per_node 2 src/train/swarm.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 1
+PP: torchrun --nproc_per_node 2 src/train/swarm.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --world.num_stages 2
 """
 import autorootcwd
 
@@ -225,7 +226,8 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
     for sample_step in range(prompt_length, tensor_length):
         LOGGER.log_message(f"Sampling token id {sample_step}", Level.DEBUG)
         if world.is_first_stage:
-            input_ids = comm.recv_input_ids()
+            if not world.is_last_stage:
+                input_ids = comm.recv_input_ids()
             if (input_ids == stop_flag).all(): break
         hidden_states = comm.recv_activations()
         output_tensor = model(input_ids, hidden_states)

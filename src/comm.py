@@ -68,7 +68,7 @@ class Comm:
         return src, tensor, metadata
 
     def send_activations(self, activations: torch.Tensor) -> None:
-        if self.world.is_last_stage: return
+        if not self.world.has_next_stage: return
         self.activations_send_queue.put((self.world.next_stage_leader, activations))
         self.logger.log_message(f"Sent activations (shape={activations.shape}, dtype={activations.dtype}, device={activations.device}) to rank {self.world.next_stage_leader}", Level.DEBUG)
 
@@ -81,7 +81,7 @@ class Comm:
             return activations
 
     def send_input_ids(self, input_ids: torch.Tensor) -> None:
-        if not (self.world.is_last_stage and self.world.is_leader): return
+        if not (self.world.is_last_stage and self.world.is_leader) or self.world.is_first_stage: return
         assert input_ids.shape == self.input_ids_shape
         self.input_ids_send_queue.put((self.world.first_stage_leader, input_ids))
         self.logger.log_message(f"Sent input_ids (shape={input_ids.shape}, dtype={input_ids.dtype}, device={input_ids.device}) to rank {self.world.first_stage_leader}", Level.DEBUG)
