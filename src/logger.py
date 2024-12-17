@@ -21,7 +21,7 @@ class Logger:
     def __init__(self, world: World, config: LoggingConfig):
         self.world, self.config = world, config
         self.file_logger, self.console_logger, self.master_logger, self.wandb_run = None, None, None, None
-        self.name = f"{world.local_rank}" if world.world_size > 1 else "M"
+        self.name = f"{world.local_rank}" if world.world_size > 1 else "*"
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.is_master = world.is_leader and world.is_last_stage # Access to sampled tokens and loss
         self.setup()
@@ -54,7 +54,7 @@ class Logger:
         if self.is_master:
             self.master_logger = logging.getLogger(f'master')
             self.master_logger.setLevel(self.config.console.log_level)
-            formatter = logging.Formatter(f'[%(levelname)s][M] %(message)s')
+            formatter = logging.Formatter(f'[%(levelname)s][*] %(message)s')
             stream_handler = logging.StreamHandler()
             stream_handler.setFormatter(formatter)
             self.master_logger.addHandler(stream_handler)

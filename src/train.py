@@ -28,10 +28,10 @@ from src.serializer import Serializer
 from src.comm import Comm
 from src.sampler import BatchData, BatchSampler
 from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
-from src.utils import seed_everything, get_logger, get_device, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
+from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
-timeout = 0.001
+timeout = 1e-4
 logger = None
 
 class SwarmConfig(BaseConfig):
@@ -75,18 +75,31 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     while True:
         if world.step_done(train_step): break
         if not comm.can_receive(): time.sleep(timeout); continue
-        if comm.can_receive_forward():
-            src, input_tensor, (root, local_micro_step) = comm.recv_forward()
-            output_tensor = model(input_tensor.to(device))
-            input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
+        if comm.can_receive_forward() and len(input_output_tensors) < train_config.max_micro_batches:
+            # Receive input tensor
+            src, input_tensor, (root, local_micro_step) = comm.recv_forward(device)
+            
+            # Forward pass
+            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(train_config.amp.dtype)):
+                output_tensor = model(input_tensor)
+
+            # Remember tensors for backward on all but last stages (TODO: Can I offload while retaining computational graph?)
+            if world.num_stages > 1 and not world.is_last_stage: # Maybe don't optimize non-pipeline for comparability
+                logger.log_message(f"Offloading input and output tensors to CPU", Level.DEBUG)
+                input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
+
+            # Send output tensor
             comm.send_forward(output_tensor, (root, local_micro_step))
 
             if world.is_last_stage:
-                # Reshape logits and targets for loss calculation
+                # Get targets and attention mask for current micro batch
                 micro_batch = micro_batches[(root, local_micro_step)]
+
+                # Filter logits and targets for loss calculation
                 mask, target_ids = micro_batch["attention_mask"].to(device), micro_batch["target_ids"].to(device)
                 logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, mask)
                 
+                # Compute loss
                 loss = loss_fn(logits_filtered, targets_filtered)
                 loss = loss / num_micro_steps
                 
@@ -100,17 +113,18 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
                 if world.is_first_stage: world.micro_step_done()
 
-        if comm.can_receive_backward():
-            _, output_tensor_grad, (root, local_micro_step) = comm.recv_backward()
-            src, input_tensor, output_tensor = input_output_tensors[(root, local_micro_step)]
+        elif comm.can_receive_backward():
+            _, output_tensor_grad, (root, local_micro_step) = comm.recv_backward(device)
+            src, input_tensor, output_tensor = input_output_tensors.pop((root, local_micro_step))
+            input_tensor, output_tensor = input_tensor.to(device), output_tensor.to(device)
             input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad)
             comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
         
             if world.is_first_stage: world.micro_step_done()
         
     # Sync gradients across ranks in same stage
-    logger.log_message(f"Syncing gradients", Level.DEBUG)
     if swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0:
+        logger.log_message(f"Syncing gradients", Level.DEBUG)
         comm.sync_gradients()
     
     # Optimizer steps
@@ -120,13 +134,15 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     optimizer.step()
     scheduler.step()
 
+    # Cleanup
+    torch.cuda.empty_cache()
+
     # Timing
-    torch.cuda.synchronize()
     step_time = time.time() - start
     micro_step_time = step_time / num_micro_steps
 
     # Compute and sync outputs
-    local_outputs = Outputs( step=train_step, lr=lr, loss=batch_loss, tokens=batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time)
+    local_outputs = Outputs(step=train_step, lr=lr, loss=batch_loss, tokens=batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time)
     stage_outputs = comm.sync_outputs(local_outputs)
 
     return local_outputs, stage_outputs
@@ -156,28 +172,20 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
-    input_output_tensors = {}
-
     logger.log_message(f"{eval_type.capitalize()} step {eval_step}", Level.DEBUG)
     while not world.step_done(eval_step, type=eval_type):
         if comm.can_receive_forward():
-            src, input_tensor, (root, local_micro_step) = comm.recv_forward()
-            output_tensor = model(input_tensor.to(device))
-            input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
+            _, input_tensor, (root, local_micro_step) = comm.recv_forward(device)
+            output_tensor = model(input_tensor)
             comm.send_forward(output_tensor, (root, local_micro_step))
 
             if world.is_last_stage:
-                # Reshape logits and targets for loss calculation
+                # Filter logits and targets for loss calculation
                 micro_batch = micro_batches[(root, local_micro_step)]
                 mask, target_ids = micro_batch["attention_mask"].to(device), micro_batch["target_ids"].to(device)
-                logits_flat = output_tensor.view(-1, output_tensor.size(-1))  # (B*L, V)
-                targets_flat = target_ids.detach().view(-1)  # (B*L)
-                
-                # Apply mask by filtering out padded positions
-                mask_flat = mask.view(-1)  # (B*L)
-                logits_filtered = logits_flat[mask_flat.bool()]  # ((B*L)', V)
-                targets_filtered = targets_flat[mask_flat.bool()]  # ((B*L)')
+                logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, mask)
 
+                # Compute loss
                 loss = loss_fn(logits_filtered, targets_filtered)
                 loss = loss / num_micro_steps
                 
@@ -196,18 +204,19 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
     return outputs, stage_outputs
 
-def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: Comm, device: torch.device, eval_config: EvalConfig) -> Outputs:
+def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: Comm, device: torch.device, eval_config: EvalConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
-    eval_range = range(1, eval_config.max_steps + 1)
+    eval_range = range(1, num_eval_steps + 1)
     eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_leader and world.is_last_stage else None
     eval_metrics.reset()
     for eval_step in eval_range:
         batch = next(eval_dataloader)
         _, stage_outputs = eval(eval_step, eval_type, model, batch, loss_fn, device, world, comm)
-        eval_metrics.update(stage_outputs)
         
         if not (world.is_leader and world.is_last_stage): continue
+        eval_metrics.update(stage_outputs)
         eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]" if eval_type == "eval" else "[TEST]"))
+        eval_bar.update()
     
     final_metrics = eval_metrics.compute()
     return final_metrics
@@ -226,11 +235,11 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
         if not world.is_leader: continue
         if world.is_first_stage:
             if not world.is_last_stage:
-                input_ids = comm.recv_input_ids()
+                input_ids = comm.recv_input_ids(device)
                 if (input_ids == stop_input_ids).all(): comm.send_activations(stop_activations); break
             output_tensor = model(input_ids)
         else:
-            hidden_states = comm.recv_activations()
+            hidden_states = comm.recv_activations(device)
             if (hidden_states == stop_activations).all(): break
             output_tensor = model(hidden_states)
         comm.send_activations(output_tensor)
@@ -350,7 +359,7 @@ def main(config: SwarmConfig):
 
     # Validate before training
     if config.eval.enable:
-        outputs = eval_loop("eval", model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
+        outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
         logger.log_metrics(outputs, level=Level.DEBUG, step=0)
 
     # Training loop
@@ -371,7 +380,7 @@ def main(config: SwarmConfig):
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
-            outputs = eval_loop("eval", model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
+            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
             logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
 
         # Sample
@@ -386,7 +395,7 @@ def main(config: SwarmConfig):
 
     # Test
     if config.eval.enable:
-        outputs = eval_loop("test", model, loss_fn, test_dataloader, test_metrics, world, comm, device, config.eval)
+        outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, comm, device, config.eval)
         logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
 
     # Sample

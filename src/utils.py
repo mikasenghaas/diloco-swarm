@@ -42,6 +42,9 @@ def get_device(local_rank: Optional[int] = None) -> torch.device:
     else:
         raise RuntimeError("No CUDA device available.")
 
+def get_dtype(dtype: str) -> torch.dtype:
+    return getattr(torch, dtype)
+
 def get_logger(world: World, logging: LoggingConfig) -> Logger:
     return Logger(world, logging)
 
