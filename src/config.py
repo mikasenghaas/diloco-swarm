@@ -32,13 +32,14 @@ class SchedulerConfig(BaseConfig):
     last_epoch: int = -1
 
 class AmpConfig(BaseConfig):
-    precision: Literal["highest", "high", "medium"] = "highest"
-    dtype: Literal["float32", "float16", "bfloat16"] = "float32"
+    precision: Literal["highest", "high", "medium"] = "high"
+    dtype: Literal["float32", "float16", "bfloat16"] = "bfloat16"
 
 class TrainConfig(BaseConfig):
     max_steps: int
     micro_batch_size: int
     batch_size: int 
+    max_micro_batches: int = 1 # Maximum number of micro batches in memory
     max_epochs: int = -1
     seed: int = 42
     max_norm: float = 1.0
