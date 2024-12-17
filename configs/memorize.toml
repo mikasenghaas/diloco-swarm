@@ -11,4 +11,4 @@ micro_batch_size = 1
 enable = false
 
 [logging.wandb]
-enable = false
+enable = true

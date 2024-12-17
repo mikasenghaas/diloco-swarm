@@ -223,6 +223,7 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
     input_ids = tokenize(config.prompt, tokenizer, max_length=tensor_length)["input_ids"].to(device).repeat(config.num_samples, 1)
     comm.load_input_ids_queue(input_ids)
     for generated_id in range(prompt_length, tensor_length):
+        if not world.is_leader: continue
         if world.is_first_stage:
             if not world.is_last_stage:
                 input_ids = comm.recv_input_ids()

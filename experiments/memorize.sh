@@ -28,9 +28,9 @@ torchrun --nproc_per_node 2 src/train.py \
     --logging.wandb.tags "$TAGS,PP"
 
 # SWARM
-# torchrun --nproc_per_node 4 src/train/train.py \
-#     @configs/memorize.toml \
-#     --world.num_stages 2 \
-#     --model @configs/model/gpt2-small.toml \
-#     --data @configs/data/memorize.toml \
-#     --logging.wandb.tags "$TAGS,PP"
+torchrun --nproc_per_node 4 src/train.py \
+    @configs/memorize.toml \
+    --swarm.num_stages 2 \
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/memorize.toml \
+    --logging.wandb.tags "$TAGS,SWARM"

@@ -85,7 +85,7 @@ class Logger:
         if self.wandb_run and self.is_master: wandb.config.update(config_dict)
 
     def log_world(self, world: World, level: Level = Level.INFO) -> None:
-        self.log_message(world, level=level)
+        self.log_message(world, level=level, master_only=False)
         if self.wandb_run and self.is_master: wandb.config.update({"world": dict(world)})
 
     def log_metrics(self, metrics: Dict[str, float], step: int | None = None, level: Level = Level.INFO) -> None:
@@ -93,10 +93,8 @@ class Logger:
         if self.wandb_run and self.is_master: wandb.log(metrics, step=step)
 
     def log_samples(self, samples: List[str], step: int, level: Level = Level.INFO) -> None:
-        self.log_message(f"-"*80, level=level)
         for i, sample in enumerate(samples):
             self.log_message(f"Sample {i+1}: {sample}", level=level)
-        self.log_message(f"-"*80, level=level)
 
         sample_path = os.path.join(self.samples_dir, f"{step}.txt")
         with open(sample_path, "w") as f:
