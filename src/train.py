@@ -218,8 +218,8 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
         eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]" if eval_type == "eval" else "[TEST]"))
         eval_bar.update()
     
-    final_metrics = eval_metrics.compute()
-    return final_metrics
+    if world.is_leader and world.is_last_stage: eval_metrics = eval_metrics.compute()
+    return eval_metrics
 
 def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: Comm, prompt_length: int, config: SampleConfig, device: torch.device) -> List[str]:
     """Sample loop for generating tokens"""

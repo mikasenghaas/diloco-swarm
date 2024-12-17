@@ -83,8 +83,9 @@ class World:
         return self.stage2ranks[stage][0]
 
     def setup_step(self, step: int, num_micro_steps: int, type: Literal["train", "eval", "test", "sample"] = "train") -> None:
-        self.store.set(f"{type}_step", str(step))
-        self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
+        if self.is_master:
+            self.store.set(f"{type}_step", str(step))
+            self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
 
     def micro_step_done(self, type: Literal["train", "eval", "test", "sample"] = "train") -> None:
         self.store.add(f"{type}_micro_steps_left", -1)

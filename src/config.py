@@ -14,7 +14,7 @@ class ModelConfig(BaseConfig):
 
 class DataConfig(BaseConfig):
     path: str
-    seq_length: int
+    seq_length: int = 1024
     name: str | None = None
     num_workers: int = 1
     subset_size: float = 1.0
@@ -36,11 +36,11 @@ class AmpConfig(BaseConfig):
     dtype: Literal["float32", "float16", "bfloat16"] = "bfloat16"
 
 class TrainConfig(BaseConfig):
-    max_steps: int
-    micro_batch_size: int
-    batch_size: int 
+    max_epochs: int = 1
+    max_steps: int = -1
+    micro_batch_size: int = 16
+    batch_size: int = 512
     max_micro_batches: int = 1 # Maximum number of micro batches in memory
-    max_epochs: int = -1
     seed: int = 42
     max_norm: float = 1.0
 
