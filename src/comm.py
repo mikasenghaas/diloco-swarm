@@ -11,7 +11,7 @@ import torch.distributed as dist
 from src.world import World
 from src.metrics import Outputs
 from src.logger import Logger, Level
-from src.serializer import Serializer, Metadata, DeserializedType
+from src.serializer import Serializer, Metadata
 
 class Comm:
     def __init__(self, world: World, shape: Tuple[int, ...], activations_shape: Tuple[int, ...], input_ids_shape: Tuple[int, ...], dtype: torch.dtype, model: nn.Module, serializer: Serializer, device: torch.device, logger: Logger, timeout: float):
@@ -63,12 +63,12 @@ class Comm:
         self.backward_send_queue.put((dst, 0, tensor, metadata))
         self.logger.log_message(f"Sent gradients (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) to rank {dst}", Level.DEBUG, master_only=False)
 
-    def recv_forward(self, device: torch.device) -> Optional[Tuple[int, DeserializedType]]:
+    def recv_forward(self, device: torch.device) -> Optional[Tuple[int, torch.Tensor, Metadata]]:
         src, tensor, metadata = self.forward_recv_queue.get()
         self.logger.log_message(f"Received activations (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) from rank {src}", Level.DEBUG, master_only=False)
         return src, tensor.to(device), metadata
 
-    def recv_backward(self, device: torch.device) -> Optional[Tuple[int, DeserializedType]]:
+    def recv_backward(self, device: torch.device) -> Optional[Tuple[int, torch.Tensor, Metadata]]:
         src, tensor, metadata = self.backward_recv_queue.get()
         self.logger.log_message(f"Received gradients (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) from rank {src}", Level.DEBUG, master_only=False)
         return src, tensor.to(device), metadata
