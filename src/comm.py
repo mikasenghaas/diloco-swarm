@@ -117,8 +117,7 @@ class Comm:
         return self.can_receive_forward() or self.can_receive_backward()
 
     def sync_gradients(self) -> None:
-        peers = self.world.stage2ranks[self.world.stage]
-        if len(peers) == 1: return
+        if len(self.world.stage2ranks[self.world.stage]) == 1: return
         for param in self.model.parameters():
             if param.grad is None: param.grad = torch.zeros_like(param)
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=self.world.curr_stage_group)
