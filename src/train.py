@@ -47,8 +47,7 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     """Training step on train batch"""
     # Prepare model
     start = time.time()
-    model.to(device)
-    model.train()
+    model.to(device); model.train()
     optimizer.zero_grad()
 
     # Setup step
@@ -147,12 +146,12 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
     return local_outputs, stage_outputs
 
+@torch.no_grad()
 def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: Comm) -> Outputs:
     """Evaluation step on eval batch"""
     # Prepare model
     start = time.time()
-    model.to(device)
-    model.eval()
+    model.to(device); model.eval()
 
     # Prepare batch batch
     batch_data = BatchData(batch)
@@ -204,6 +203,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
     return outputs, stage_outputs
 
+@torch.no_grad()
 def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: Comm, device: torch.device, eval_config: EvalConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
     eval_range = range(1, num_eval_steps + 1)
@@ -221,6 +221,7 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
     if world.is_leader and world.is_last_stage: eval_metrics = eval_metrics.compute()
     return eval_metrics
 
+@torch.no_grad()
 def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: Comm, prompt_length: int, config: SampleConfig, device: torch.device) -> List[str]:
     """Sample loop for generating tokens"""
     model.to(device); model.eval()
@@ -316,8 +317,8 @@ def main(config: SwarmConfig):
 
     # Setup training
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, cycle=True)
-    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=False)
-    test_dataloader = get_dataloader(test_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=False)
+    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=True)
+    test_dataloader = get_dataloader(test_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=True)
 
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)

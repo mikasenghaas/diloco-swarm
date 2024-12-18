@@ -12,11 +12,10 @@ torchrun --nproc_per_node 1 src/train.py \
     --data.subset_size 0.1 \
     --train.max_epochs 1 \
     --train.micro_batch_size 16 \
-    --eval.enable false \
-    --eval.every_n_steps 10 \
+    --eval.every_n_steps 20 \
     --eval.max_steps 50 \
-    --sample.enable false \
-    --logging.wandb.enable true \
+    --sample.every_n_steps 10 \
+    --logging.wandb.enable false \
     --logging.wandb.tags "$TAGS,DP"
 
 # SYNC_EVERY_N_STEPS=(1 50 400)
