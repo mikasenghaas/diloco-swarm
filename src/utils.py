@@ -164,3 +164,8 @@ def filter_logits_targets(logits: torch.Tensor, target_ids: torch.Tensor, attent
     targets_filtered = targets_flat[mask_flat.bool()]  # ((B*L)')
 
     return logits_filtered, targets_filtered
+
+def initialize_gradients(model):
+    for param in model.parameters():
+        if param.requires_grad and param.grad is None:
+            param.grad = torch.zeros_like(param)

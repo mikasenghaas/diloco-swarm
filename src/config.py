@@ -43,6 +43,7 @@ class TrainConfig(BaseConfig):
     max_micro_batches: int = 1 # Maximum number of micro batches in memory
     seed: int = 42
     max_norm: float = 1.0
+    step_timeout: float = 60 # Timeout step after one minute (adjust to hardware!) TODO: Find bug that makes it timeout
 
     amp: AmpConfig = AmpConfig()
     optimizer: OptimizerConfig = OptimizerConfig()

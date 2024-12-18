@@ -89,8 +89,9 @@ class Logger:
         if self.wandb_run and self.is_master: wandb.config.update({"world": dict(world)})
 
     def log_metrics(self, metrics: Dict[str, float], step: int | None = None, level: Level = Level.INFO) -> None:
-        self.log_message(metrics, level=level)
-        if self.wandb_run and self.is_master: wandb.log(metrics, step=step)
+        if self.is_master:
+            self.log_message(metrics, level=level)
+            if self.wandb_run and self.is_master: wandb.log(metrics, step=step)
 
     def log_samples(self, samples: List[str], step: int, level: Level = Level.INFO) -> None:
         for i, sample in enumerate(samples):

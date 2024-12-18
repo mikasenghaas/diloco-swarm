@@ -28,7 +28,7 @@ from src.serializer import Serializer
 from src.comm import Comm
 from src.sampler import BatchData, BatchSampler
 from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
-from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
+from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
 timeout = 1e-4
@@ -43,7 +43,7 @@ class SwarmConfig(BaseConfig):
     sample: SampleConfig = SampleConfig()
     logging: LoggingConfig = LoggingConfig()
 
-def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, device: torch.device, swarm_config: SwarmConfig, train_config: TrainConfig) -> Outputs:
+def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, device: torch.device, swarm_config: SwarmConfig, train_config: TrainConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
@@ -73,6 +73,9 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     logger.log_message(f"Train step {train_step}", Level.DEBUG)
     while True:
         if world.step_done(train_step): break
+        if time.time() - start > train_config.step_timeout:
+            logger.log_message(f"Train step {train_step} timed out", Level.DEBUG)
+            break
         if not comm.can_receive(): time.sleep(timeout); continue
         if comm.can_receive_forward() and len(input_output_tensors) < train_config.max_micro_batches:
             # Receive input tensor
@@ -121,8 +124,12 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
         
             if world.is_first_stage: world.micro_step_done()
         
+    # Synchronize
+    dist.barrier()
+    torch.cuda.synchronize()
+
     # Sync gradients across ranks in same stage
-    if swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0:
+    if (swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0) or train_step == num_train_steps:
         logger.log_message(f"Syncing gradients", Level.DEBUG)
         comm.sync_gradients()
     
@@ -133,7 +140,7 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
     optimizer.step()
     scheduler.step()
 
-    # Cleanup
+    # Empty cache
     torch.cuda.empty_cache()
 
     # Timing
@@ -146,7 +153,6 @@ def train(train_step: int, model: nn.Module, batch: Dict[str, torch.Tensor], los
 
     return local_outputs, stage_outputs
 
-@torch.no_grad()
 def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: Comm) -> Outputs:
     """Evaluation step on eval batch"""
     # Prepare model
@@ -195,6 +201,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
                 world.micro_step_done(eval_type)
 
     # Timing
+    dist.barrier()
     torch.cuda.synchronize()
     step_time = time.time() - start
 
@@ -218,6 +225,8 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
         eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]" if eval_type == "eval" else "[TEST]"))
         eval_bar.update()
     
+    dist.barrier()
+
     if world.is_leader and world.is_last_stage: eval_metrics = eval_metrics.compute()
     return eval_metrics
 
@@ -258,6 +267,8 @@ def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: 
                 if world.is_first_stage: break
             if generated_id < tensor_length - 1: comm.send_input_ids(input_ids)
 
+    dist.barrier()
+
     return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids] if world.is_last_stage and world.is_leader else []
 
 def main(config: SwarmConfig):
@@ -293,10 +304,15 @@ def main(config: SwarmConfig):
 
     # Load model and create sharded version
     model = get_model(config.model)
+    original_num_params = model.num_parameters()
     logger.log_message(f"Loaded model ({format_int(model.num_parameters(), 2)} parameters)")
     
     model = get_sharded_model(model, world)
-    logger.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)", master_only=False)
+    if model.num_parameters() < original_num_params:
+        logger.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)", master_only=False)
+
+    # Initialize gradients (prevents sync issues when first evaluating)
+    initialize_gradients(model)
 
     # Load tokenizer
     tokenizer = get_tokenizer()
@@ -369,7 +385,7 @@ def main(config: SwarmConfig):
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for train_step in train_range:
         batch = next(train_dataloader)
-        _, stage_outputs = train(train_step, model, batch, loss_fn, optimizer, scheduler, world, comm, device, config.swarm, config.train)
+        _, stage_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, comm, device, config.swarm, config.train)
 
         # Update metrics
         if world.is_leader and world.is_last_stage:
@@ -379,15 +395,15 @@ def main(config: SwarmConfig):
             train_bar.set_description(get_train_pbar_description(train_metrics, prefix="[TRAIN]"))
             train_bar.update()
 
-        # Validate
-        if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
-            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
-            logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
-
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
             samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
             logger.log_samples(samples, step=train_step)
+
+        # Validate
+        if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
+            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
+            logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
 
         # TODO: Implement checkpointing
         # if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
