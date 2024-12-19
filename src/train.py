@@ -62,7 +62,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
         micro_dataloader = DataLoader(batch_data, batch_size=train_config.micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
             if world.is_last_stage: micro_batches[(rank, local_micro_step)] = micro_batch
-            if world.is_first_stage and rank == world.rank: comm.load_forward_queue(local_micro_step, micro_batch["input_ids"])
+            if world.is_first_stage and rank == world.rank: comm.load_forward_queue(train_step, local_micro_step, micro_batch["input_ids"])
     
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
@@ -79,7 +79,8 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
         if not comm.can_receive(): time.sleep(timeout); continue
         if comm.can_receive_forward() and len(input_output_tensors) < train_config.max_micro_batches:
             # Receive input tensor
-            src, input_tensor, (root, local_micro_step) = comm.recv_forward(device)
+            src, input_tensor, (step, root, local_micro_step) = comm.recv_forward(device)
+            if step != train_step: continue
             
             # Forward pass
             with torch.amp.autocast(device_type=device.type, dtype=get_dtype(train_config.amp.dtype)):
@@ -91,7 +92,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
                 input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
 
             # Send output tensor
-            comm.send_forward(output_tensor, (root, local_micro_step))
+            comm.send_forward(output_tensor, (train_step, root, local_micro_step))
 
             if world.is_last_stage:
                 # Get targets and attention mask for current micro batch
@@ -173,16 +174,17 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
         micro_dataloader = DataLoader(batch_data, batch_size=micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader):
             if world.is_last_stage: micro_batches[(rank, local_micro_step)] = micro_batch
-            if world.is_first_stage and rank == world.rank: comm.load_forward_queue(local_micro_step, micro_batch["input_ids"])
+            if world.is_first_stage and rank == world.rank: comm.load_forward_queue(eval_step, local_micro_step, micro_batch["input_ids"])
     
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
     logger.log_message(f"{eval_type.capitalize()} step {eval_step}", Level.DEBUG)
     while not world.step_done(eval_step, type=eval_type):
         if comm.can_receive_forward():
-            _, input_tensor, (root, local_micro_step) = comm.recv_forward(device)
+            _, input_tensor, (step, root, local_micro_step) = comm.recv_forward(device)
+            if step != eval_step: continue
             output_tensor = model(input_tensor)
-            comm.send_forward(output_tensor, (root, local_micro_step))
+            comm.send_forward(output_tensor, (eval_step, root, local_micro_step))
 
             if world.is_last_stage:
                 # Filter logits and targets for loss calculation
@@ -398,12 +400,12 @@ def main(config: SwarmConfig):
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
             samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
-            logger.log_samples(samples, step=train_step)
+            logger.log_samples(samples, step=train_step, level=Level.DEBUG)
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
             outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
-            logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
+            logger.log_metrics(outputs, step=train_step, level=Level.DEBUG)
 
         # TODO: Implement checkpointing
         # if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:

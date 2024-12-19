@@ -56,21 +56,21 @@ class Comm:
         if not self.world.has_next_stage: return
         dst = random.choice(self.world.stage2ranks[self.world.stage + 1])
         self.forward_send_queue.put((dst, 0, tensor, metadata))
-        self.logger.log_message(f"Sent activations (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) to rank {dst}", Level.DEBUG, master_only=False)
+        self.logger.log_message(f"Sent activations (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, train_step={metadata[0]}, root={metadata[1]}, local_micro_step={metadata[2]}) to rank {dst}", Level.DEBUG, master_only=False)
 
     def send_backward(self, dst: int, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_prev_stage: return
         self.backward_send_queue.put((dst, 0, tensor, metadata))
-        self.logger.log_message(f"Sent gradients (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) to rank {dst}", Level.DEBUG, master_only=False)
+        self.logger.log_message(f"Sent gradients (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, train_step={metadata[0]}, root={metadata[1]}, local_micro_step={metadata[2]}) to rank {dst}", Level.DEBUG, master_only=False)
 
     def recv_forward(self, device: torch.device) -> Optional[Tuple[int, torch.Tensor, Metadata]]:
         src, tensor, metadata = self.forward_recv_queue.get()
-        self.logger.log_message(f"Received activations (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) from rank {src}", Level.DEBUG, master_only=False)
+        self.logger.log_message(f"Received activations (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, train_step={metadata[0]}, root={metadata[1]}, local_micro_step={metadata[2]}) from rank {src}", Level.DEBUG, master_only=False)
         return src, tensor.to(device), metadata
 
     def recv_backward(self, device: torch.device) -> Optional[Tuple[int, torch.Tensor, Metadata]]:
         src, tensor, metadata = self.backward_recv_queue.get()
-        self.logger.log_message(f"Received gradients (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, root={metadata[0]}, local_micro_step={metadata[1]}) from rank {src}", Level.DEBUG, master_only=False)
+        self.logger.log_message(f"Received gradients (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, train_step={metadata[0]}, root={metadata[1]}, local_micro_step={metadata[2]}) from rank {src}", Level.DEBUG, master_only=False)
         return src, tensor.to(device), metadata
 
     def send_activations(self, activations: torch.Tensor) -> None:
@@ -104,8 +104,8 @@ class Comm:
         if not (self.world.is_first_stage and self.world.is_leader): return
         self.input_ids_recv_queue.put((-1, input_ids))
 
-    def load_forward_queue(self, local_micro_step: int, input_tensor: torch.Tensor) -> None:
-        self.forward_recv_queue.put((-1, input_tensor, (self.world.rank, local_micro_step)))
+    def load_forward_queue(self, train_step: int, local_micro_step: int, input_tensor: torch.Tensor) -> None:
+        self.forward_recv_queue.put((-1, input_tensor, (train_step, self.world.rank, local_micro_step)))
 
     def can_receive_forward(self) -> bool:
         return not self.forward_recv_queue.empty()
