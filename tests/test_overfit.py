@@ -2,6 +2,7 @@ import re
 import shutil
 import subprocess
 
+import torch
 import pytest
     
 TIMEOUT = 30
@@ -23,7 +24,9 @@ CMD = lambda num_processes, num_stages, device, run_id: [
     "--logging.log_dir", LOG_DIR,
     "--logging.run_id", run_id,
     "--sample.enable", "true",
+    "--sample.every_n_steps", "20",
     "--eval.enable", "true",
+    "--eval.every_n_steps", "20",
     "--logging.wandb.enable", "false",
 ]
 
@@ -33,15 +36,18 @@ def device(request):
         pytest.skip("CUDA device not available")
     return request.param
 
-@pytest.fixture(scope="session")
-@pytest.mark.parametrize("config", [
+@pytest.fixture(params=[
     {"name": "single_process", "num_processes": 1, "num_stages": 1},
     {"name": "data_parallel", "num_processes": 2, "num_stages": 1},
     {"name": "pipeline_parallel", "num_processes": 2, "num_stages": 2},
     {"name": "large_pipeline_parallel", "num_processes": 3, "num_stages": 3},
     {"name": "swarm", "num_processes": 4, "num_stages": 2},
     {"name": "large_swarm", "num_processes": 9, "num_stages": 3},
-])
+], ids=lambda x: x["name"], scope="session")
+def config(request):
+    return request.param
+
+@pytest.fixture(scope="session")
 def overfit_process(device, config):
     """Start overfit training process."""
     # Create run id
