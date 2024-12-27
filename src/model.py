@@ -257,9 +257,9 @@ class ShardedGPT2(GPT2):
         x = self.forward_layers(x)
         return self.forward_logits(x)
 
-    def backward(self, input_tensor, output_tensor, output_tensor_grad):
+    def backward(self, input_tensor, output_tensor, output_tensor_grad, device: torch.device):
         if input_tensor is not None: input_tensor.retain_grad()
         if output_tensor_grad is None:
             output_tensor_grad = torch.ones_like(output_tensor, memory_format=torch.preserve_format)
-        torch.autograd.backward(output_tensor, grad_tensors=output_tensor_grad, retain_graph=False, create_graph=False)
+        torch.autograd.backward(output_tensor.to(device), grad_tensors=output_tensor_grad.to(device), retain_graph=False, create_graph=False)
         return input_tensor.grad if input_tensor is not None else None

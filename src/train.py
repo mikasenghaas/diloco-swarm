@@ -107,7 +107,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
                 local_batch_loss += loss.detach().item()
                 
                 # Backward pass
-                input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, loss, None)
+                input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, loss, None, device)
                 training_comm.send_backward(dst=src, tensor=input_tensor_grad, metadata=(root, local_micro_step))
 
                 if world.is_first_stage: world.micro_step_done()
@@ -116,7 +116,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
             _, output_tensor_grad, (root, local_micro_step) = training_comm.recv_backward()
             src, input_tensor, output_tensor = input_output_tensors.pop((root, local_micro_step))
             input_tensor, output_tensor = input_tensor.to(device), output_tensor.to(device)
-            input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad)
+            input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad, device)
             training_comm.send_backward(dst=src, tensor=input_tensor_grad, metadata=(root, local_micro_step))
         
             if world.is_first_stage: world.micro_step_done()
@@ -183,7 +183,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
             if world.is_last_stage:
                 # Filter logits and targets for loss calculation
-                mask, target_ids = micro_batch["attention_mask"], micro_batch["target_ids"]
+                mask, target_ids = micro_batch["attention_mask"].to(device), micro_batch["target_ids"].to(device)
                 logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, mask)
 
                 # Compute loss
