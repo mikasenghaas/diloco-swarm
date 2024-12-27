@@ -253,7 +253,7 @@ class ShardedGPT2(GPT2):
 
     def forward(self, batch: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         x = batch["hidden_states"].to(device) if batch["hidden_states"] is not None else batch["input_ids"].to(device)
-        x = self.encode_tokens(x)
+        x = self.encode_tokens(x) if self.world.is_first_stage else x
         x = self.forward_layers(x)
         return self.forward_logits(x)
 

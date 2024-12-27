@@ -37,7 +37,8 @@ class SwarmConfig(BaseConfig):
     model: ModelConfig
     data: DataConfig
     train: TrainConfig
-    amp: AmpConfig
+    device: str | None = None
+    amp: AmpConfig = AmpConfig()
     swarm: SwarmConfig = SwarmConfig()
     eval: EvalConfig = EvalConfig()
     sample: SampleConfig = SampleConfig()
@@ -63,19 +64,17 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
         for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
             micro_batches[(rank, local_micro_step)] = micro_batch
             if world.is_first_stage and rank == world.rank: training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
-    
+
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
     input_output_tensors = {}
 
     # Zero gradients
     optimizer.zero_grad()
-    logger.log_message(f"Train step {train_step}", Level.DEBUG)
+    logger.log_message(f"Train step {train_step}", master=False, level=Level.DEBUG)
     while True:
         if world.is_step_done(train_step): break
-        if time.time() - start > train_config.step_timeout:
-            logger.log_message(f"Train step {train_step} timed out", Level.DEBUG)
-            break
+        if time.time() - start > train_config.step_timeout: logger.log_message(f"Train step {train_step} timed out", master=False, level=Level.WARNING); break
         if not (training_comm.forward_recv_thread.can_receive or training_comm.backward_recv_thread.can_receive): time.sleep(1e-4); continue
         if training_comm.forward_recv_thread.can_receive and len(input_output_tensors) < train_config.max_micro_batches:
             # Receive input tensor
@@ -89,11 +88,11 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
 
             # Remember tensors for backward on all but last stages
             if world.num_stages > 1 and not world.is_last_stage: # Maybe don't optimize non-pipeline for comparability
-                logger.log_message(f"Offloading input and output tensors to CPU", Level.DEBUG)
+                logger.log_message(f"Offloading input and output tensors to CPU", master=False, level=Level.DEBUG)
                 input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
 
             # Send output tensor
-            training_comm.send_forward(tensor=output_tensor, metadata=(train_step, root, local_micro_step))
+            training_comm.send_forward(tensor=output_tensor, metadata=(root, local_micro_step))
 
             if world.is_last_stage:
                 # Get targets and attention mask for current micro batch
@@ -132,11 +131,11 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
 
     # Sync gradients across ranks in same stage
     if (swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0) or train_step == num_train_steps:
-        logger.log_message(f"Syncing gradients", Level.DEBUG)
+        logger.log_message(f"Syncing gradients", master=False, level=Level.DEBUG)
         training_comm.sync_gradients(model)
     
     # Optimizer steps
-    logger.log_message(f"Step optimizer and scheduler", Level.DEBUG)
+    logger.log_message(f"Step optimizer and scheduler", master=False, level=Level.DEBUG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_norm)
     lr = scheduler.get_last_lr()[0]
     optimizer.step()
@@ -179,7 +178,7 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
-    logger.log_message(f"{eval_type.capitalize()} step {eval_step}", Level.DEBUG)
+    logger.log_message(f"{eval_type.capitalize()} step {eval_step}", master=False, level=Level.DEBUG)
     while not world.is_step_done(eval_step, type=eval_type):
         if training_comm.forward_recv_thread.can_receive:
             _, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
@@ -272,50 +271,50 @@ def main(config: SwarmConfig):
 
     # Get logger
     logger = get_logger(world, config.logging)
-    logger.log_message(f"Starting process {world.local_rank}", Level.INFO, master_only=False)
+    logger.log_message(f"Starting process {world.local_rank}", master=False, level=Level.INFO)
     logger.log_config(config)
     logger.log_world(world)
 
     # Seed everything
     seed_everything(config.train.seed)
-    logger.log_message(f"Seeded everything with {config.train.seed}", Level.INFO)
+    logger.log_message(f"Seeded everything with {config.train.seed}", master=False, level=Level.INFO)
 
     # Set device
-    device = get_device(world.local_rank)
-    logger.log_message(f"Using device {device}", Level.INFO, master_only=False)
+    device = get_device(config.device, world.local_rank)
+    logger.log_message(f"Using device {device}", master=False, level=Level.INFO)
 
     # Set precision
     torch.set_float32_matmul_precision(config.amp.precision)
-    logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}")
+    logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}", master=True, level=Level.INFO)
 
     # Load model and create sharded version
     model = get_model(config.model)
     original_num_params = model.num_parameters()
-    logger.log_message(f"Loaded model ({format_int(model.num_parameters(), 2)} parameters)")
+    logger.log_message(f"Loaded model ({format_int(model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
     
     model = get_sharded_model(model, world)
     if model.num_parameters() < original_num_params:
-        logger.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)", master_only=False)
+        logger.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
 
     # Initialize gradients (prevents sync issues when first evaluating)
     initialize_gradients(model)
 
     # Load tokenizer
     tokenizer = get_tokenizer()
-    logger.log_message(f"Loaded tokenizer ({format_int(len(tokenizer), 0)} vocab size)")
+    logger.log_message(f"Loaded tokenizer ({format_int(len(tokenizer), 0)} vocab size)", master=True, level=Level.INFO)
 
-    # Load
+    # Load dataset
     train_data = get_dataset(config.data, split="train")
     val_data = get_dataset(config.data, split="validation")
     test_data = get_dataset(config.data, split="test")
-    logger.log_message(f"Loaded dataset {config.data.path}/{config.data.name} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
+    logger.log_message(f"Loaded dataset {config.data.path} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples", master=True, level=Level.INFO)
 
     # Prepare dataset
     seq_length = config.data.seq_length + 1
     train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
     val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
     test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
-    logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples")
+    logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples", master=True, level=Level.INFO)
 
     # Setup training
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, cycle=True)
@@ -331,23 +330,25 @@ def main(config: SwarmConfig):
     train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
     eval_setup = get_train_setup(num_eval_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
     test_setup = get_train_setup(num_test_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(test_data))
-    logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]))
-    logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]))
-    logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]))
+    logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]), master=True, level=Level.INFO)
+    logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]), master=True, level=Level.INFO)
+    logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]), master=True, level=Level.INFO)
 
     # Get optimizer and scheduler
     optimizer = get_optimizer(model, config.train.optimizer)
     scheduler = get_scheduler(optimizer, num_train_steps, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
+    logger.log_message("Initialized optimizer, scheduler and loss function", master=True, level=Level.INFO)
 
     # Initialize metrics
-    train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train")
+    local_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/local")
+    global_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/global")
     eval_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="eval")
     test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
     # Initialize training communication
     training_shape = (config.train.micro_batch_size, config.data.seq_length, model.config.n_embd)
-    training_comm = TrainingComm(world, training_shape)
+    training_comm = TrainingComm(world, training_shape, logger)
 
     # Initialize inference communication
     if config.sample.enable:
@@ -363,38 +364,44 @@ def main(config: SwarmConfig):
     # Validate before training
     if config.eval.enable:
         outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config.amp)
-        logger.log_metrics(outputs, level=Level.DEBUG, step=0)
+        logger.log_metrics(outputs, step=0, master=True)
 
     # Training loop
-    logger.log_message(f"Starting training")
+    logger.log_message(f"Starting training", master=False, level=Level.DEBUG)
     train_range = range(1, num_train_steps + 1)
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for train_step in train_range:
         batch = next(train_dataloader)
-        _, stage_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config.swarm, config.train, config.amp)
+        local_outputs, global_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config.swarm, config.train, config.amp)
 
-        # Update metrics
-        if world.is_leader and world.is_last_stage:
-            train_metrics.update(stage_outputs)
-            curr_metrics = train_metrics.compute()
-            logger.log_metrics(curr_metrics, level=Level.DEBUG, step=train_step)
-            train_bar.set_description(get_train_pbar_description(train_metrics, prefix="[TRAIN]"))
+        # Update local metrics
+        if world.is_last_stage:
+            local_train_metrics.update(local_outputs)
+            curr_metrics = local_train_metrics.compute()
+            logger.log_metrics(curr_metrics, step=train_step, master=False)
+
+        # Update global metrics
+        if world.is_master and global_outputs is not None:
+            global_train_metrics.update(global_outputs)
+            curr_metrics = global_train_metrics.compute()
+            logger.log_metrics(curr_metrics, step=train_step, master=True)
+            train_bar.set_description(get_train_pbar_description(global_train_metrics, prefix="[TRAIN]"))
             train_bar.update()
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
             samples = sample_loop(train_step, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
-            logger.log_samples(samples, step=train_step, level=Level.DEBUG)
+            logger.log_samples(samples, step=train_step)
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
             outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config.amp)
-            logger.log_metrics(outputs, step=train_step, level=Level.DEBUG)
+            logger.log_metrics(outputs, step=train_step, master=True)
 
     # Test
     if config.eval.enable:
         outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config.amp)
-        logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
+        logger.log_metrics(outputs, step=train_step, master=True)
 
     # Sample
     if config.sample.enable:
@@ -406,5 +413,4 @@ def main(config: SwarmConfig):
     dist.destroy_process_group()
 
 if __name__ == "__main__":
-    from datasets import disable_progress_bar; disable_progress_bar()
     main(SwarmConfig(**parse_argv()))

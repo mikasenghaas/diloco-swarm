@@ -10,6 +10,7 @@ import torch.distributed as dist
 
 from src.world import World
 from src.metrics import Outputs
+from src.logger import Logger, Level
 from src.serializer import Serializer, Metadata
 
 class SendThread:
@@ -76,8 +77,8 @@ class TrainingComm():
     added to store metadata which is serialized into the tensor before sending and deserialized after receiving.
     The class also implements gradient synchronization and output aggregation that can be called after a step.
     """
-    def __init__(self, world: World, shape: Tuple[int, ...]):
-        self.world, self.shape = world, shape
+    def __init__(self, world: World, shape: Tuple[int, ...], logger: Logger):
+        self.world, self.shape, self.logger = world, shape, logger
         training_kwargs = {"tag": 0, "serialize": True, "requires_grad": True}
         self.forward_send_thread = SendThread(shape, group=self.world.next_stage_group, start=self.world.has_next_stage, **training_kwargs)
         self.backward_recv_thread = RecvThread(shape, group=self.world.next_stage_group, start=self.world.has_next_stage, **training_kwargs)
@@ -87,24 +88,24 @@ class TrainingComm():
     def send_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_next_stage: return
         dst = random.choice(self.world.stage2ranks[self.world.stage + 1]) # Random next stage rank
-        # print(f"[Rank {self.world.rank}] Sending forward to {dst}")
+        self.logger.log_message(f"[Rank {self.world.rank}] Sending forward to {dst}", level=Level.DEBUG, master=False)
         self.forward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def send_backward(self, dst: int, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_prev_stage: return
-        # print(f"[Rank {self.world.rank}] Sending backward to {dst}")
+        self.logger.log_message(f"[Rank {self.world.rank}] Sending backward to {dst}", level=Level.DEBUG, master=False)
         self.backward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def recv_forward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        # print(f"[Rank {self.world.rank}] Receiving forward")
+        self.logger.log_message(f"[Rank {self.world.rank}] Receiving forward", level=Level.DEBUG, master=False)
         return self.forward_recv_thread.receive()
 
     def recv_backward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        # print(f"[Rank {self.world.rank}] Receiving backward")
+        self.logger.log_message(f"[Rank {self.world.rank}] Receiving backward", level=Level.DEBUG, master=False)
         return self.backward_recv_thread.receive()
 
     def load_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
-        # print(f"[Rank {self.world.rank}] Loading forward")
+        self.logger.log_message(f"[Rank {self.world.rank}] Loading forward", level=Level.DEBUG, master=False)
         self.forward_recv_thread.load(tensor=tensor, metadata=metadata)
 
     def sync_gradients(self, model: nn.Module) -> None:
