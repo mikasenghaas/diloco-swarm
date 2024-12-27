@@ -4,6 +4,7 @@
 /tools
 /data
 /checkpoints
+/huggingface
 .gitconfig
 .sshconfig
 
