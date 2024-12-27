@@ -7,7 +7,7 @@ import numpy as np
 from dotenv import load_dotenv
 from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
@@ -32,7 +32,8 @@ def get_hf_cache_dir() -> str:
     persistent_dir = os.getenv("PERSISTENT_DIR")
     return os.path.join(persistent_dir, "huggingface")
 
-def get_device(local_rank: Optional[int] = None) -> torch.device:
+def get_device(device: Optional[str] = None, local_rank: Optional[int] = None) -> torch.device:
+    if device: return torch.device(device, local_rank if device == "cuda" else None)
     if torch.cuda.is_available():
         return torch.device("cuda", local_rank)
     return torch.device("cpu")
@@ -68,10 +69,15 @@ def get_scheduler(optimizer: AdamW, num_steps: int, scheduler_config: SchedulerC
         return LambdaLR(optimizer, lambda step: lr_lambda(step, scheduler_config.num_warmup_steps, num_steps, scheduler_config.num_cycles, scheduler_config.min_lr_factor), last_epoch=scheduler_config.last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
 
-def get_dataset(data_config: DataConfig, split: str | None = None) -> Dataset:
-    datadict = load_dataset(data_config.path, data_config.name, trust_remote_code=True, cache_dir=get_hf_cache_dir())
-    if split is None:
-        return datadict
+def get_dataset(data_config: DataConfig, split: str) -> Dataset:
+    # Define a path for the processed dataset
+    processed_path = os.path.join(get_hf_cache_dir(), data_config.path)
+    try: # Try loading from disk
+        datadict = load_from_disk(processed_path)
+    except (FileNotFoundError, ValueError): # If not found, load from HF and save to disk
+        datadict = load_dataset(data_config.path, trust_remote_code=True)
+        os.makedirs(os.path.dirname(processed_path), exist_ok=True)
+        datadict.save_to_disk(processed_path)
     dataset = datadict[split]
     if data_config.subset_size < 1.0:
         dataset = dataset.select(range(int(len(dataset) * data_config.subset_size)))
@@ -113,11 +119,12 @@ def get_eval_pbar_description(metrics: Metrics, prefix: str):
 
 def get_num_steps(max_steps: int, max_epochs: int, num_examples: int, batch_size: int) -> int:
     """Get number of steps to train/val/test; whatever is reached first max_steps or max_epochs"""
+    assert num_examples >= batch_size, "Number of examples must be at least batch size"
     assert max_steps > 0 or max_epochs > 0, "Specify at least one of `max_steps` and `max_epochs`"
     max_steps_epoch = num_examples // batch_size * max_epochs
     if max_epochs == -1: return max_steps
-    elif max_steps == -1: return max_steps_epoch
-    else: return min(max_steps, max_steps_epoch)
+    if max_steps == -1: return max_steps_epoch
+    return min(max_steps, max_steps_epoch)
 
 def get_train_setup(steps: int, batch_size: int, seq_length: int, micro_batch_size: int, num_examples: int):
     tokens_per_step = batch_size * seq_length
