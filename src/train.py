@@ -25,13 +25,12 @@ from transformers import AutoTokenizer
 from src.logger import Level
 from src.world import World
 from src.serializer import Serializer
-from src.comm import Comm
+from src.comm import TrainingComm, InferenceComm
 from src.sampler import BatchData, BatchSampler
 from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig
 from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
-timeout = 1e-4
 logger = None
 
 class SwarmConfig(BaseConfig):
@@ -43,7 +42,7 @@ class SwarmConfig(BaseConfig):
     sample: SampleConfig = SampleConfig()
     logging: LoggingConfig = LoggingConfig()
 
-def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, comm: Comm, device: torch.device, swarm_config: SwarmConfig, train_config: TrainConfig) -> Outputs:
+def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, swarm_config: SwarmConfig, train_config: TrainConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
@@ -61,8 +60,8 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
         micro_sampler = BatchSampler(batch_data, rank=rank, ranks=world.first_stage_ranks, micro_batch_size=train_config.micro_batch_size)
         micro_dataloader = DataLoader(batch_data, batch_size=train_config.micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
-            if world.is_last_stage: micro_batches[(rank, local_micro_step)] = micro_batch
-            if world.is_first_stage and rank == world.rank: comm.load_forward_queue(train_step, local_micro_step, micro_batch["input_ids"])
+            micro_batches[(rank, local_micro_step)] = micro_batch
+            if world.is_first_stage and rank == world.rank: training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
     
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
@@ -72,27 +71,28 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
     optimizer.zero_grad()
     logger.log_message(f"Train step {train_step}", Level.DEBUG)
     while True:
-        if world.step_done(train_step): break
+        if world.is_step_done(train_step): break
         if time.time() - start > train_config.step_timeout:
             logger.log_message(f"Train step {train_step} timed out", Level.DEBUG)
             break
-        if not comm.can_receive(): time.sleep(timeout); continue
-        if comm.can_receive_forward() and len(input_output_tensors) < train_config.max_micro_batches:
+        if not (training_comm.forward_recv_thread.can_receive or training_comm.backward_recv_thread.can_receive): time.sleep(1e-4); continue
+        if training_comm.forward_recv_thread.can_receive and len(input_output_tensors) < train_config.max_micro_batches:
             # Receive input tensor
-            src, input_tensor, (step, root, local_micro_step) = comm.recv_forward(device)
-            if step != train_step: continue
+            src, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
+            micro_batch = micro_batches[(root, local_micro_step)]
+            micro_batch["hidden_states"] = input_tensor
             
             # Forward pass
             with torch.amp.autocast(device_type=device.type, dtype=get_dtype(train_config.amp.dtype)):
-                output_tensor = model(input_tensor)
+                output_tensor = model.forward(micro_batch, device)
 
-            # Remember tensors for backward on all but last stages (TODO: Can I offload while retaining computational graph?)
+            # Remember tensors for backward on all but last stages
             if world.num_stages > 1 and not world.is_last_stage: # Maybe don't optimize non-pipeline for comparability
                 logger.log_message(f"Offloading input and output tensors to CPU", Level.DEBUG)
                 input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
 
             # Send output tensor
-            comm.send_forward(output_tensor, (train_step, root, local_micro_step))
+            training_comm.send_forward(tensor=output_tensor, metadata=(train_step, root, local_micro_step))
 
             if world.is_last_stage:
                 # Get targets and attention mask for current micro batch
@@ -112,27 +112,27 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
                 
                 # Backward pass
                 input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, loss, None)
-                comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
+                training_comm.send_backward(dst=src, tensor=input_tensor_grad, metadata=(root, local_micro_step))
 
                 if world.is_first_stage: world.micro_step_done()
 
-        elif comm.can_receive_backward():
-            _, output_tensor_grad, (root, local_micro_step) = comm.recv_backward(device)
+        elif training_comm.backward_recv_thread.can_receive:
+            _, output_tensor_grad, (root, local_micro_step) = training_comm.recv_backward()
             src, input_tensor, output_tensor = input_output_tensors.pop((root, local_micro_step))
             input_tensor, output_tensor = input_tensor.to(device), output_tensor.to(device)
             input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad)
-            comm.send_backward(src, input_tensor_grad, (root, local_micro_step))
+            training_comm.send_backward(dst=src, tensor=input_tensor_grad, metadata=(root, local_micro_step))
         
             if world.is_first_stage: world.micro_step_done()
         
     # Synchronize
     dist.barrier()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available(): torch.cuda.synchronize()
 
     # Sync gradients across ranks in same stage
     if (swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0) or train_step == num_train_steps:
         logger.log_message(f"Syncing gradients", Level.DEBUG)
-        comm.sync_gradients()
+        training_comm.sync_gradients(model)
     
     # Optimizer steps
     logger.log_message(f"Step optimizer and scheduler", Level.DEBUG)
@@ -142,7 +142,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
     scheduler.step()
 
     # Empty cache
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
 
     # Timing
     step_time = time.time() - start
@@ -150,11 +150,11 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
 
     # Compute and sync outputs
     local_outputs = Outputs(step=train_step, lr=lr, loss=batch_loss, tokens=batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time)
-    stage_outputs = comm.sync_outputs(local_outputs)
+    stage_outputs = training_comm.sync_outputs(local_outputs)
 
     return local_outputs, stage_outputs
 
-def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, comm: Comm) -> Outputs:
+def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, training_comm: TrainingComm) -> Outputs:
     """Evaluation step on eval batch"""
     # Prepare model
     start = time.time()
@@ -174,17 +174,17 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
         micro_dataloader = DataLoader(batch_data, batch_size=micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader):
             if world.is_last_stage: micro_batches[(rank, local_micro_step)] = micro_batch
-            if world.is_first_stage and rank == world.rank: comm.load_forward_queue(eval_step, local_micro_step, micro_batch["input_ids"])
+            if world.is_first_stage and rank == world.rank: training_comm.load_forward(eval_step, local_micro_step, micro_batch["input_ids"])
     
     # Prepare statistics
     batch_loss, batch_tokens = 0.0, 0
     logger.log_message(f"{eval_type.capitalize()} step {eval_step}", Level.DEBUG)
     while not world.step_done(eval_step, type=eval_type):
-        if comm.can_receive_forward():
-            _, input_tensor, (step, root, local_micro_step) = comm.recv_forward(device)
+        if training_comm.forward_recv_thread.can_receive:
+            _, input_tensor, (step, root, local_micro_step) = training_comm.recv_forward()
             if step != eval_step: continue
             output_tensor = model(input_tensor)
-            comm.send_forward(output_tensor, (eval_step, root, local_micro_step))
+            training_comm.send_forward(tensor=output_tensor, metadata=(eval_step, root, local_micro_step))
 
             if world.is_last_stage:
                 # Filter logits and targets for loss calculation
@@ -204,23 +204,23 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
     # Timing
     dist.barrier()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available(): torch.cuda.synchronize()
     step_time = time.time() - start
 
     outputs = Outputs(step=eval_step, time=step_time, loss=batch_loss, tokens=batch_tokens)
-    stage_outputs = comm.sync_outputs(outputs)
+    stage_outputs = training_comm.sync_outputs(outputs)
 
     return outputs, stage_outputs
 
 @torch.no_grad()
-def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, comm: Comm, device: torch.device, eval_config: EvalConfig) -> Outputs:
+def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, eval_config: EvalConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
     eval_range = range(1, num_eval_steps + 1)
     eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_leader and world.is_last_stage else None
     eval_metrics.reset()
     for eval_step in eval_range:
         batch = next(eval_dataloader)
-        _, stage_outputs = eval(eval_step, eval_type, model, batch, loss_fn, device, world, comm)
+        _, stage_outputs = eval(eval_step, eval_type, model, batch, loss_fn, device, world, training_comm)
         
         if not (world.is_leader and world.is_last_stage): continue
         eval_metrics.update(stage_outputs)
@@ -233,45 +233,34 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
     return eval_metrics
 
 @torch.no_grad()
-def sample_loop(model: nn.Module, tokenizer: AutoTokenizer, world: World, comm: Comm, prompt_length: int, config: SampleConfig, device: torch.device) -> List[str]:
+def sample_loop(train_step: int, model: nn.Module, tokenizer: AutoTokenizer, world: World, inference_comm: InferenceComm, prompt_length: int, config: SampleConfig, device: torch.device) -> List[str]:
     """Sample loop for generating tokens"""
     model.to(device); model.eval()
 
-    # Prepare input and generate output
+    # Prepare input
     tensor_length = prompt_length + config.max_new_tokens
-    stop_input_ids = -torch.ones((config.num_samples, tensor_length), device=device, dtype=torch.long)
-    stop_activations = -torch.ones((config.num_samples, tensor_length, model.config.n_embd), device=device, dtype=torch.float32)
     input_ids = tokenize(config.prompt, tokenizer, max_length=tensor_length)["input_ids"].to(device).repeat(config.num_samples, 1)
-    comm.load_input_ids_queue(input_ids)
-    for generated_id in range(prompt_length, tensor_length):
-        if not world.is_leader: continue
-        if world.is_first_stage:
-            if not world.is_last_stage:
-                input_ids = comm.recv_input_ids(device)
-                if (input_ids == stop_input_ids).all(): comm.send_activations(stop_activations); break
-            output_tensor = model(input_ids)
-        else:
-            hidden_states = comm.recv_activations(device)
-            if (hidden_states == stop_activations).all(): break
-            output_tensor = model(hidden_states)
-        comm.send_activations(output_tensor)
+    micro_batch = {"input_ids": input_ids, "attention_mask": None, "hidden_states": None}
+    if world.is_leader and world.is_first_stage: inference_comm.load(input_ids)
 
+    generated_id = prompt_length; world.setup_step(train_step, num_micro_steps=config.max_new_tokens, type="sample")
+    while world.is_leader and not world.is_step_done(train_step, type="sample"):
+        if not inference_comm.recv_thread.can_receive: time.sleep(TIMEOUT); continue
+        tensor_type, input_tensor = inference_comm.receive()
+        micro_batch[tensor_type] = input_tensor
+        output_tensor = model.forward(micro_batch, device)
         if world.is_last_stage:
-            logits = output_tensor[:, generated_id-1, :] / config.temperature # (B, V)
-            if config.top_k is not None:
-                v, _ = torch.topk(logits, min(config.top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf') # (B, V)
-            probs = F.softmax(logits, dim=-1) # (B, V)
-            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1),
+            probs = F.softmax(output_tensor[:, generated_id-1, :], dim=-1) # (B, V)
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
             input_ids[:, generated_id] = idx_next.squeeze()
-            if (idx_next == tokenizer.eos_token_id).all():
-                comm.send_input_ids(stop_input_ids)
-                if world.is_first_stage: break
-            if generated_id < tensor_length - 1: comm.send_input_ids(input_ids)
+            output_tensor = input_ids
+            world.micro_step_done(type="sample")
+            if (idx_next == tokenizer.eos_token_id).all(): world.step_done(type="sample"); break
+            if generated_id >= tensor_length-1: break
+            generated_id += 1
+        inference_comm.send(output_tensor)
 
-    dist.barrier()
-
-    return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids] if world.is_last_stage and world.is_leader else []
+    return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids]
 
 def main(config: SwarmConfig):
     global logger
@@ -291,14 +280,7 @@ def main(config: SwarmConfig):
 
     # Set device
     device = get_device(world.local_rank)
-    torch.cuda.set_device(world.local_rank)
     logger.log_message(f"Using device {device}", Level.INFO, master_only=False)
-
-    # TODO: Initialize checkpoint
-    # if config.logging.ckpt.enable:
-    #     ckpt = Checkpoint(logger.checkpoint_dir)
-    #     ckpt.setup(world)
-    #     logger.log_message(f"Checkpoint directory: {ckpt.base_dir}")
 
     # Set precision
     torch.set_float32_matmul_precision(config.train.amp.precision)
@@ -362,23 +344,23 @@ def main(config: SwarmConfig):
     test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
     # Initialize training communication
-    activations_shape, input_ids_shape = None, None
+    training_shape = (config.train.micro_batch_size, config.data.seq_length, model.config.n_embd)
+    training_comm = TrainingComm(world, training_shape)
+
+    # Initialize inference communication
     if config.sample.enable:
         prompt_length = tokenize(config.sample.prompt, tokenizer)["input_ids"].shape[1]
-        activations_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, model.config.n_embd)
-        input_ids_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens)
-
-    serializer = Serializer((config.train.micro_batch_size, config.data.seq_length, model.config.n_embd))
-    comm = Comm(world, serializer.shape, activations_shape, input_ids_shape, torch.float32, model, serializer, device, logger, timeout) # Sample before training
+        inference_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, model.config.n_embd)
+        inference_comm = InferenceComm(world, inference_shape)
 
     # Sample before training
     if config.sample.enable:
-        samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
+        samples = sample_loop(0, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
         logger.log_samples(samples, step=0)
 
     # Validate before training
     if config.eval.enable:
-        outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
+        outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config.eval)
         logger.log_metrics(outputs, level=Level.DEBUG, step=0)
 
     # Training loop
@@ -387,7 +369,7 @@ def main(config: SwarmConfig):
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for train_step in train_range:
         batch = next(train_dataloader)
-        _, stage_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, comm, device, config.swarm, config.train)
+        _, stage_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config.swarm, config.train)
 
         # Update metrics
         if world.is_leader and world.is_last_stage:
@@ -399,27 +381,22 @@ def main(config: SwarmConfig):
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and train_step % config.sample.every_n_steps == 0:
-            samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
+            samples = sample_loop(train_step, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
             logger.log_samples(samples, step=train_step, level=Level.DEBUG)
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and train_step % config.eval.every_n_steps == 0:
-            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, comm, device, config.eval)
+            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config.eval)
             logger.log_metrics(outputs, step=train_step, level=Level.DEBUG)
-
-        # TODO: Implement checkpointing
-        # if config.logging.ckpt.enable and config.logging.ckpt.every_n_steps > 0 and train_step % config.logging.ckpt.every_n_steps == 0:
-        #     ckpt_dir = ckpt.save(train_step, model)
-        #     logger.log_message(f"Saved model checkpoint at {ckpt_dir}")
 
     # Test
     if config.eval.enable:
-        outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, comm, device, config.eval)
+        outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config.eval)
         logger.log_metrics(outputs, level=Level.DEBUG, step=train_step)
 
     # Sample
     if config.sample.enable:
-        samples = sample_loop(model, tokenizer, world, comm, prompt_length, config.sample, device)
+        samples = sample_loop(train_step, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
         logger.log_samples(samples, step=train_step)
 
     # Cleanup

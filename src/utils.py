@@ -27,20 +27,15 @@ def seed_everything(seed: int):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
 
-def get_persistent_dir() -> str | None:
-    # Load env variable from ~/.env file
+def get_hf_cache_dir() -> str:
     load_dotenv(os.path.expanduser("~/.env"))
     persistent_dir = os.getenv("PERSISTENT_DIR")
-    
-    return persistent_dir
-
-HF_CACHE_DIR = os.path.join(get_persistent_dir(), "huggingface")
+    return os.path.join(persistent_dir, "huggingface")
 
 def get_device(local_rank: Optional[int] = None) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda", local_rank)
-    else:
-        raise RuntimeError("No CUDA device available.")
+    return torch.device("cpu")
 
 def get_dtype(dtype: str) -> torch.dtype:
     return getattr(torch, dtype)
@@ -55,7 +50,7 @@ def get_sharded_model(model: GPT2, world: World) -> ShardedGPT2:
     return ShardedGPT2(model, world)
 
 def get_tokenizer() -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=HF_CACHE_DIR)
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=get_hf_cache_dir())
     tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
@@ -74,7 +69,7 @@ def get_scheduler(optimizer: AdamW, num_steps: int, scheduler_config: SchedulerC
     return LambdaLR(optimizer, lambda _: 1)
 
 def get_dataset(data_config: DataConfig, split: str | None = None) -> Dataset:
-    datadict = load_dataset(data_config.path, data_config.name, trust_remote_code=True, cache_dir=HF_CACHE_DIR)
+    datadict = load_dataset(data_config.path, data_config.name, trust_remote_code=True, cache_dir=get_hf_cache_dir())
     if split is None:
         return datadict
     dataset = datadict[split]

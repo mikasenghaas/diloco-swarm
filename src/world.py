@@ -34,16 +34,11 @@ class World:
         self.run_id = datetime.now().replace(second=int(datetime.now().second/10)*10).strftime("%Y%m%d_%H%M%S")
         
         # Initialize stage-specific process groups
-        self.local_pg = {}
-        for stage1, stage2 in zip(range(self.num_stages-1), range(1, self.num_stages)):
-            self.local_pg[(stage1, stage2)] = dist.new_group(self.stage2ranks[stage1] + self.stage2ranks[stage2])
-        self.local_pg[(0,self.num_stages-1)] = dist.new_group(list(set(self.stage2ranks[0] + self.stage2ranks[self.num_stages-1])))
-        self.local_pg[self.stage] = dist.new_group(self.stage2ranks[self.stage], use_local_synchronization=True)
-        
+        self.local_pg = {(stage, stage+1): dist.new_group(self.stage2ranks[stage] + self.stage2ranks[stage+1]) for stage in range(self.num_stages-1)}
         self.prev_stage_group = self.local_pg.get((self.stage-1, self.stage), None)
-        self.curr_stage_group = self.local_pg[self.stage]
         self.next_stage_group = self.local_pg.get((self.stage, self.stage+1), None)
-        self.first_last_stage_group = self.local_pg[(0, self.num_stages-1)] if self.is_first_stage or self.is_last_stage else None
+        self.curr_stage_group = dist.new_group(self.stage2ranks[self.stage], use_local_synchronization=True)
+        self.first_last_stage_group = dist.new_group(list(set(self.stage2ranks[0] + self.stage2ranks[self.num_stages-1])), use_local_synchronization=True)
 
         # Synchronize world setup
         dist.barrier()
@@ -76,30 +71,33 @@ class World:
     def first_stage_ranks(self) -> List[int]:
         return self.stage2ranks[0]
 
+    def setup_step(self, step: int, num_micro_steps: int, type: str = "train") -> None:
+        if self.is_master:
+            self.store.set(f"{type}_step", str(step))
+            self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
+
+    def micro_step_done(self, type: str = "train") -> None:
+        self.store.add(f"{type}_micro_steps_left", -1)
+        if self.micro_steps_left(type) == 0:
+            self.step_done(type)
+
+    def step_done(self, type: str = "train") -> None:
+        self.store.add(f"{type}_step", 1)
+
+    def is_step_done(self, local_step: int, type: str = "train") -> bool:
+        return local_step < self.step(type)
+
+    def micro_steps_left(self, type: str = "train") -> int:
+        return int(self.store.get(f"{type}_micro_steps_left").decode())
+
+    def step(self, type: str = "train") -> int:
+        return int(self.store.get(f"{type}_step").decode())
+
     def _assign_stage(self, rank: int) -> int:
         return rank % self.num_stages
 
     def _assign_leader(self, stage: int) -> int:
         return self.stage2ranks[stage][0]
-
-    def setup_step(self, step: int, num_micro_steps: int, type: Literal["train", "eval", "test", "sample"] = "train") -> None:
-        if self.is_master:
-            self.store.set(f"{type}_step", str(step))
-            self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
-
-    def micro_step_done(self, type: Literal["train", "eval", "test", "sample"] = "train") -> None:
-        self.store.add(f"{type}_micro_steps_left", -1)
-        if self.micro_steps_left(type) == 0:
-            self.store.add(f"{type}_step", 1)
-
-    def step_done(self, local_step: int, type: Literal["train", "eval", "test", "sample"] = "train") -> bool:
-        return local_step < self.step(type)
-
-    def micro_steps_left(self, type: Literal["train", "eval", "test"] = "train") -> int:
-        return int(self.store.get(f"{type}_micro_steps_left").decode())
-
-    def step(self, type: Literal["train", "eval", "test"] = "train") -> int:
-        return int(self.store.get(f"{type}_step").decode())
 
     def __repr__(self) -> str:
         return f"World(rank={self.rank}, stage={self.stage}, is_first_stage={self.is_first_stage}, is_last_stage={self.is_last_stage}, is_master={self.is_master}, is_leader={self.is_leader})"
