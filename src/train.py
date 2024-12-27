@@ -28,7 +28,7 @@ from src.serializer import Serializer
 from src.comm import TrainingComm, InferenceComm
 from src.sampler import BatchData, BatchSampler
 from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig, AmpConfig
-from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets
+from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets, nullcontext
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
 
 logger = None
@@ -83,7 +83,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
             micro_batch["hidden_states"] = input_tensor
             
             # Forward pass
-            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)):
+            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
                 output_tensor = model.forward(micro_batch, device)
 
             # Remember tensors for backward on all but last stages

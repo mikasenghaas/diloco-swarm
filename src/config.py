@@ -31,6 +31,7 @@ class SchedulerConfig(BaseConfig):
     last_epoch: int = -1
 
 class AmpConfig(BaseConfig):
+    enable: bool = True
     precision: Literal["highest", "high", "medium"] = "high"
     dtype: Literal["float32", "float16", "bfloat16"] = "bfloat16"
 

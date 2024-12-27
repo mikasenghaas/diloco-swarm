@@ -1,5 +1,6 @@
 import os
 import math
+import contextlib
 
 import torch
 import torch.nn as nn
@@ -51,7 +52,7 @@ def get_sharded_model(model: GPT2, world: World) -> ShardedGPT2:
     return ShardedGPT2(model, world)
 
 def get_tokenizer() -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, cache_dir=get_hf_cache_dir())
+    tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2", fast=True, trust_remote_code=True, clean_up_tokenization_spaces=True, cache_dir=get_hf_cache_dir())
     tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
@@ -171,3 +172,6 @@ def initialize_gradients(model):
     for param in model.parameters():
         if param.requires_grad and param.grad is None:
             param.grad = torch.zeros_like(param)
+
+def nullcontext():
+    return contextlib.nullcontext()
