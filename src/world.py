@@ -25,13 +25,12 @@ class World:
         self.stage = self.ranks2stage[self.rank]
         self.is_first_stage = self.stage == 0
         self.is_last_stage = self.stage == self.num_stages - 1
-        self.is_master = self.rank == 0
         self.is_leader = self.rank == self.stage2leader[self.stage]
+        self.is_master = self.is_leader and self.is_last_stage
 
         # Initialize process groups using the same store
         self.store = dist.TCPStore(host_name=self.master_addr, port=self.master_port+1, world_size=self.world_size, is_master=(self.rank == 0))
         self.global_pg = dist.init_process_group(backend="gloo", store=self.store, rank=self.rank, world_size=self.world_size)
-        self.run_id = datetime.now().replace(second=int(datetime.now().second/10)*10).strftime("%Y%m%d_%H%M%S")
         
         # Initialize stage-specific process groups
         self.local_pg = {(stage, stage+1): dist.new_group(self.stage2ranks[stage] + self.stage2ranks[stage+1]) for stage in range(self.num_stages-1)}
