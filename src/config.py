@@ -45,7 +45,6 @@ class TrainConfig(BaseConfig):
     max_norm: float = 1.0
     step_timeout: float = 60 # Timeout step after one minute (adjust to hardware!) TODO: Find bug that makes it timeout
 
-    amp: AmpConfig = AmpConfig()
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
 
@@ -85,13 +84,8 @@ class WandbLoggingConfig(BaseConfig):
             return v.split(',')
         return v
 
-# class CheckpointingConfig(BaseConfig):
-#     enable: bool = False
-#     every_n_steps: int = -1
-
 class LoggingConfig(BaseConfig):
     log_dir: str = "logs"
     console: ConsoleLoggingConfig = ConsoleLoggingConfig()
     file: FileLoggingConfig = FileLoggingConfig()
     wandb: WandbLoggingConfig = WandbLoggingConfig()
-    # ckpt: CheckpointingConfig = CheckpointingConfig()
