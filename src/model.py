@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
@@ -251,8 +251,9 @@ class ShardedGPT2(GPT2):
         start_layer = sum(layers_per_gpu[:self.world.stage])
         return list(range(start_layer, start_layer + layers_per_gpu[self.world.stage]))
 
-    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        x = self.encode_tokens(input_tensor) if input_tensor.dtype == torch.int64 else input_tensor
+    def forward(self, batch: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
+        x = batch["hidden_states"].to(device) if batch["hidden_states"] is not None else batch["input_ids"].to(device)
+        x = self.encode_tokens(x)
         x = self.forward_layers(x)
         return self.forward_logits(x)
 
