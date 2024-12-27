@@ -3,9 +3,7 @@ import shutil
 import subprocess
 
 import pytest
-
-from .fixtures import *
-
+    
 TIMEOUT = 30
 LOG_DIR = "/tmp/swarm/test"
 CMD = lambda num_processes, num_stages, device, run_id: [
@@ -17,7 +15,7 @@ CMD = lambda num_processes, num_stages, device, run_id: [
     "--model", "@configs/model/gpt2-tiny.toml",
     "--data", "@configs/data/memorize.toml",
     "--data.seq_length", "128",
-    "--train.max_epochs", "35",
+    "--train.max_epochs", "40",
     "--train.batch_size", "1",
     "--train.micro_batch_size", "1",
     "--train.optimizer.lr", "0.006",
@@ -25,11 +23,25 @@ CMD = lambda num_processes, num_stages, device, run_id: [
     "--logging.log_dir", LOG_DIR,
     "--logging.run_id", run_id,
     "--sample.enable", "true",
-    "--eval.enable", "false",
+    "--eval.enable", "true",
     "--logging.wandb.enable", "false",
 ]
 
+@pytest.fixture(params=["cpu", "cuda"], scope="session")
+def device(request):
+    if request.param == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
+    return request.param
+
 @pytest.fixture(scope="session")
+@pytest.mark.parametrize("config", [
+    {"name": "single_process", "num_processes": 1, "num_stages": 1},
+    {"name": "data_parallel", "num_processes": 2, "num_stages": 1},
+    {"name": "pipeline_parallel", "num_processes": 2, "num_stages": 2},
+    {"name": "large_pipeline_parallel", "num_processes": 3, "num_stages": 3},
+    {"name": "swarm", "num_processes": 4, "num_stages": 2},
+    {"name": "large_swarm", "num_processes": 9, "num_stages": 3},
+])
 def overfit_process(device, config):
     """Start overfit training process."""
     # Create run id

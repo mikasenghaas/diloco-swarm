@@ -43,7 +43,7 @@ class Logger:
 
         # Set up master logging
         if self.is_master:
-            self.master_file_logger = self._setup_file_logger(f'master-file', "*", self.config.file.log_level)
+            self.master_file_logger = self._setup_file_logger(f'master-file', "master", self.config.file.log_level)
             self.master_console_logger = self._setup_console_logger(f'master-console', "*", self.config.console.log_level)
 
         # Set up wandb logging
@@ -62,8 +62,8 @@ class Logger:
         if master:
             if self.master_console_logger: self.master_console_logger.log(msg=message, level=level.value)
             if self.master_file_logger: self.master_file_logger.log(msg=message, level=level.value)
-            return
-        if self.console_logger: self.console_logger.log(msg=message, level=level.value)
+        else:
+            if self.console_logger: self.console_logger.log(msg=message, level=level.value)
 
     def log_config(self, config: BaseConfig) -> None:
         config_dict = config.model_dump()
@@ -94,7 +94,7 @@ class Logger:
     def _setup_file_logger(self, name: str, short_name: str, level: Level) -> None:
         logger = logging.getLogger(name)
         logger.setLevel(level)
-        file_handler = logging.FileHandler(os.path.join(self.log_dir, f"{name}.log"))
+        file_handler = logging.FileHandler(os.path.join(self.log_dir, f"{short_name}.log"))
         file_handler.setFormatter(logging.Formatter(f'[%(levelname)s][{short_name}] %(message)s'))
         logger.addHandler(file_handler)
         return logger
