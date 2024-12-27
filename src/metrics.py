@@ -8,6 +8,7 @@ class Outputs(BaseModel):
     time: float
     loss: float
     tokens: int
+    num_micro_batches: int = 1
     lr: float | None = None
     norm: float | None = None
     micro_step_time: float | None = None
@@ -32,8 +33,8 @@ class Step(Metric):
     def __init__(self):
         self.step = 0
 
-    def update(self, _: Outputs):
-        self.step += 1
+    def update(self, outputs: Outputs):
+        self.step = outputs.step
 
     def compute(self) -> Dict[str, float]:
         return {"current": self.step}
@@ -84,6 +85,20 @@ class Tokens(Metric):
 
     def reset(self):
         self.tokens = []
+
+class NumMicroBatches(Metric):
+    __name__ = "num_micro_batches"
+    def __init__(self):
+        self.num_micro_batches : int = 0
+
+    def update(self, outputs: Outputs):
+        self.num_micro_batches += outputs.num_micro_batches
+
+    def compute(self) -> Dict[str, float]:
+        return {"current": self.num_micro_batches}
+
+    def reset(self):
+        self.num_micro_batches = 0
 
 class Norm(Metric):
     __name__ = "norm"

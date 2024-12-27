@@ -1,6 +1,7 @@
 import os
 import math
 import contextlib
+from typing import Optional, List, Dict, Tuple, Any, Generator
 
 import torch
 import torch.nn as nn
@@ -18,8 +19,8 @@ from src.logger import Logger
 from src.metrics import Metrics
 from src.world import World
 from src.model import GPT2, ShardedGPT2, GPT2Config
+from src.sampler import BatchData, BatchSampler
 
-from typing import Optional, List, Dict, Tuple, Any
     
 def seed_everything(seed: int):
     torch.manual_seed(seed)
@@ -95,6 +96,14 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
     return cycle_iter(dataloader) if cycle else iter(dataloader)
+
+def get_micro_batches(batch: Dict[str, torch.Tensor], micro_batch_size: int, world: World) -> Generator:
+    batch_data = BatchData(batch)
+    for rank in world.first_stage_ranks:
+        micro_sampler = BatchSampler(batch_data, rank=rank, ranks=world.first_stage_ranks, micro_batch_size=micro_batch_size)
+        micro_dataloader = DataLoader(batch_data, batch_size=micro_batch_size, shuffle=False, sampler=micro_sampler)
+        for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
+            yield rank, local_micro_step, micro_batch
 
 def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = None, return_tensors: str | None = "pt") -> Dict[str, Any]:
     if max_length is None:

@@ -88,12 +88,12 @@ class TrainingComm():
     def send_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_next_stage: return
         dst = random.choice(self.world.stage2ranks[self.world.stage + 1]) # Random next stage rank
-        self.logger.log_message(f"[Rank {self.world.rank}] Sending forward to {dst}", level=Level.DEBUG, master=False)
+        self.logger.log_message(f"[Rank {self.world.rank}] Sending {tensor.shape} with metadata {metadata} forward to {dst}", level=Level.DEBUG, master=False)
         self.forward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def send_backward(self, dst: int, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_prev_stage: return
-        self.logger.log_message(f"[Rank {self.world.rank}] Sending backward to {dst}", level=Level.DEBUG, master=False)
+        self.logger.log_message(f"[Rank {self.world.rank}] Sending {tensor.shape} with metadata {metadata} backward to {dst}", level=Level.DEBUG, master=False)
         self.backward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def recv_forward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
@@ -125,6 +125,7 @@ class TrainingComm():
             time=outputs.time,
             loss=sum([output.loss for output in all_outputs]),
             tokens=sum([output.tokens for output in all_outputs]),
+            num_micro_batches=sum([output.num_micro_batches for output in all_outputs]),
             lr=outputs.lr,
             norm=outputs.norm,
             micro_step_time=outputs.micro_step_time

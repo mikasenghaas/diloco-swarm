@@ -1,10 +1,10 @@
 """
-Simple SWARM Parallel LLM Pre-Training.
+SWARM Parallel LLM Pre-Training.
 
-Single GPU:  torchrun --nproc_per_node 1 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 1
-DP: torchrun --nproc_per_node 2 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 1
-PP: torchrun --nproc_per_node 2 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 2
-SWARM: torchrun --nproc_per_node 4 src/train.py @configs/debug.toml --model @configs/model/gpt2-tiny.toml --data @configs/data/wikitext.toml --swarm.num_stages 2
+Single GPU: torchrun --nproc_per_node 1 src/train.py --swarm.num_stages 1 --model @configs/model/gpt2-small.toml --data @configs/data/wikitext.toml
+DP:         torchrun --nproc_per_node 2 src/train.py --swarm.num_stages 2 --model @configs/model/gpt2-small.toml --data @configs/data/wikitext.toml
+PP:         torchrun --nproc_per_node 2 src/train.py --swarm.num_stages 2 --model @configs/model/gpt2-small.toml --data @configs/data/wikitext.toml
+SWARM:      torchrun --nproc_per_node 4 src/train.py --swarm.num_stages 2 --model @configs/model/gpt2-small.toml --data @configs/data/wikitext.toml
 """
 import autorootcwd
 
@@ -24,20 +24,18 @@ from transformers import AutoTokenizer
 
 from src.logger import Level
 from src.world import World
-from src.serializer import Serializer
 from src.comm import TrainingComm, InferenceComm
-from src.sampler import BatchData, BatchSampler
 from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig, AmpConfig
-from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets, nullcontext
-from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, Loss, Perplexity, Throughput, Norm, LearningRate
+from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_batches, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets, nullcontext
+from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, NumMicroBatches, Loss, Perplexity, Throughput, Norm, LearningRate
 
 logger = None
 
 class SwarmConfig(BaseConfig):
     model: ModelConfig
     data: DataConfig
-    train: TrainConfig
     device: str | None = None
+    train: TrainConfig = TrainConfig()
     amp: AmpConfig = AmpConfig()
     swarm: SwarmConfig = SwarmConfig()
     eval: EvalConfig = EvalConfig()
@@ -56,17 +54,14 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
     world.setup_step(train_step, num_micro_steps=num_micro_steps)
 
     # Prepare batch batch
-    batch_data = BatchData(batch)
-    micro_batches = {} # (rank, local_micro_step) -> micro_batch
-    for rank in world.first_stage_ranks:
-        micro_sampler = BatchSampler(batch_data, rank=rank, ranks=world.first_stage_ranks, micro_batch_size=train_config.micro_batch_size)
-        micro_dataloader = DataLoader(batch_data, batch_size=train_config.micro_batch_size, shuffle=False, sampler=micro_sampler)
-        for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
-            micro_batches[(rank, local_micro_step)] = micro_batch
-            if world.is_first_stage and rank == world.rank: training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
+    micro_batches = {}
+    for rank, local_micro_step, micro_batch in get_micro_batches(batch, train_config.micro_batch_size, world):
+        micro_batches[(rank, local_micro_step)] = micro_batch
+        if world.is_first_stage and rank == world.rank:
+            training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
 
     # Prepare statistics
-    batch_loss, batch_tokens = 0.0, 0
+    local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
     input_output_tensors = {}
 
     # Zero gradients
@@ -81,6 +76,10 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
             src, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
             micro_batch = micro_batches[(root, local_micro_step)]
             micro_batch["hidden_states"] = input_tensor
+
+            # Update statistics
+            local_num_micro_batches += 1
+            local_batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
             
             # Forward pass
             with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
@@ -105,10 +104,7 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
                 # Compute loss
                 loss = loss_fn(logits_filtered, targets_filtered)
                 loss = loss / num_micro_steps
-                
-                # Update statistics
-                batch_loss += loss.detach().item()
-                batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
+                local_batch_loss += loss.detach().item()
                 
                 # Backward pass
                 input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, loss, None)
@@ -141,16 +137,15 @@ def train(train_step: int, num_train_steps: int, model: nn.Module, batch: Dict[s
     optimizer.step()
     scheduler.step()
 
-    # Empty cache
-    if torch.cuda.is_available(): torch.cuda.empty_cache()
-
     # Timing
     step_time = time.time() - start
     micro_step_time = step_time / num_micro_steps
 
     # Compute and sync outputs
-    local_outputs = Outputs(step=train_step, lr=lr, loss=batch_loss, tokens=batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time)
-    stage_outputs = training_comm.sync_outputs(local_outputs)
+    local_outputs, stage_outputs = Outputs(step=train_step, lr=lr, loss=local_batch_loss, tokens=local_batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time, num_micro_batches=local_num_micro_batches), None
+    if (swarm_config.sync_every_n_steps > 0 and train_step % swarm_config.sync_every_n_steps == 0) or train_step == num_train_steps:
+        logger.log_message(f"Syncing outputs", master=False, level=Level.DEBUG)
+        stage_outputs = training_comm.sync_outputs(local_outputs)
 
     return local_outputs, stage_outputs
 
@@ -160,33 +155,31 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     start = time.time()
     model.to(device); model.eval()
 
-    # Prepare batch batch
-    batch_data = BatchData(batch)
-
     # Setup step
-    micro_batch_size = len(batch_data)
-    num_micro_steps = 1
-    world.setup_step(eval_step, num_micro_steps=num_micro_steps, type=eval_type) # Assume batch size = micro batch size
+    world.setup_step(eval_step, num_micro_steps=1, type=eval_type) # Assume batch size = micro batch size
 
-    micro_batches = {} # (rank, local_micro_step) -> micro_batch
-    for rank in world.first_stage_ranks:
-        micro_sampler = BatchSampler(batch_data, rank, world.first_stage_ranks, micro_batch_size)
-        micro_dataloader = DataLoader(batch_data, batch_size=micro_batch_size, shuffle=False, sampler=micro_sampler)
-        for local_micro_step, micro_batch in enumerate(micro_dataloader):
-            micro_batches[(rank, local_micro_step)] = micro_batch
-            if world.is_first_stage and rank == world.rank: training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
+    # Prepare micro batches
+    micro_batches = {}
+    for rank, local_micro_step, micro_batch in get_micro_batches(batch, len(batch), world):
+        micro_batches[(rank, local_micro_step)] = micro_batch
+        if world.is_first_stage and rank == world.rank:
+            training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
     
     # Prepare statistics
-    batch_loss, batch_tokens = 0.0, 0
+    local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
     logger.log_message(f"{eval_type.capitalize()} step {eval_step}", master=False, level=Level.DEBUG)
     while not world.is_step_done(eval_step, type=eval_type):
         if training_comm.forward_recv_thread.can_receive:
             _, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
             micro_batch = micro_batches[(root, local_micro_step)]
             micro_batch["hidden_states"] = input_tensor
-            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)):
+            local_batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
+            local_num_micro_batches += 1
+
+            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
                 output_tensor = model.forward(micro_batch, device)
-            training_comm.send_forward(tensor=output_tensor, metadata=(eval_step, root, local_micro_step))
+
+            training_comm.send_forward(tensor=output_tensor, metadata=(root, local_micro_step))
 
             if world.is_last_stage:
                 # Filter logits and targets for loss calculation
@@ -195,11 +188,9 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
                 # Compute loss
                 loss = loss_fn(logits_filtered, targets_filtered)
-                loss = loss / num_micro_steps
                 
                 # Update statistics
-                batch_loss += loss.detach().item()
-                batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
+                local_batch_loss += loss.detach().item()
 
                 world.micro_step_done(eval_type)
 
@@ -208,10 +199,10 @@ def eval(eval_step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     if torch.cuda.is_available(): torch.cuda.synchronize()
     step_time = time.time() - start
 
-    outputs = Outputs(step=eval_step, time=step_time, loss=batch_loss, tokens=batch_tokens)
-    stage_outputs = training_comm.sync_outputs(outputs)
+    local_outputs = Outputs(step=eval_step, time=step_time, loss=local_batch_loss, tokens=local_batch_tokens, num_micro_batches=local_num_micro_batches)
+    stage_outputs = training_comm.sync_outputs(local_outputs)
 
-    return outputs, stage_outputs
+    return local_outputs, stage_outputs
 
 @torch.no_grad()
 def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, train_config: TrainConfig) -> Outputs:
@@ -277,7 +268,7 @@ def main(config: SwarmConfig):
 
     # Seed everything
     seed_everything(config.train.seed)
-    logger.log_message(f"Seeded everything with {config.train.seed}", master=False, level=Level.INFO)
+    logger.log_message(f"Seeded everything with {config.train.seed}", master=True, level=Level.INFO)
 
     # Set device
     device = get_device(config.device, world.local_rank)
@@ -341,8 +332,8 @@ def main(config: SwarmConfig):
     logger.log_message("Initialized optimizer, scheduler and loss function", master=True, level=Level.INFO)
 
     # Initialize metrics
-    local_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/local")
-    global_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/global")
+    local_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/local")
+    global_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/global")
     eval_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="eval")
     test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
@@ -372,17 +363,16 @@ def main(config: SwarmConfig):
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for train_step in train_range:
         batch = next(train_dataloader)
-        local_outputs, global_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config.swarm, config.train, config.amp)
+        local_outputs, stage_outputs = train(train_step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config.swarm, config.train, config.amp)
 
         # Update local metrics
-        if world.is_last_stage:
-            local_train_metrics.update(local_outputs)
-            curr_metrics = local_train_metrics.compute()
-            logger.log_metrics(curr_metrics, step=train_step, master=False)
+        local_train_metrics.update(local_outputs)
+        curr_metrics = local_train_metrics.compute()
+        logger.log_metrics(curr_metrics, step=train_step, master=False)
 
         # Update global metrics
-        if world.is_master and global_outputs is not None:
-            global_train_metrics.update(global_outputs)
+        if world.is_master and stage_outputs is not None:
+            global_train_metrics.update(stage_outputs)
             curr_metrics = global_train_metrics.compute()
             logger.log_metrics(curr_metrics, step=train_step, master=True)
             train_bar.set_description(get_train_pbar_description(global_train_metrics, prefix="[TRAIN]"))
