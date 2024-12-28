@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.optim import AdamW
+from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from pydantic_config import BaseConfig, parse_argv
@@ -25,8 +25,8 @@ from transformers import AutoTokenizer
 from src.logger import Level
 from src.world import World
 from src.comm import TrainingComm, InferenceComm
-from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig, AmpConfig
-from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_batches, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets, nullcontext
+from src.config import SwarmConfig, ModelConfig, DataConfig, OptimizerConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig, AmpConfig
+from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_batches, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets, nullcontext, get_outer_model, compute_pseudo_gradient, sync_inner_model
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, NumMicroBatches, Loss, Perplexity, Throughput, Norm, LearningRate
 
 logger = None
@@ -35,8 +35,8 @@ timeout = 1e-4
 class SwarmConfig(BaseConfig):
     model: ModelConfig
     data: DataConfig
+    train: TrainConfig
     device: str | None = None
-    train: TrainConfig = TrainConfig()
     amp: AmpConfig = AmpConfig()
     swarm: SwarmConfig = SwarmConfig()
     eval: EvalConfig = EvalConfig()
@@ -155,12 +155,12 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
     if world.is_master: eval_metrics = eval_metrics.compute()
     return eval_metrics
 
-def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
+def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
-    model.to(device); model.train()
-    optimizer.zero_grad()
+    inner_model.to(device); inner_model.train()
+    inner_optimizer.zero_grad()
 
     # Setup step
     num_micro_steps = config.train.batch_size // config.train.micro_batch_size
@@ -192,7 +192,7 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
             
             # Forward pass
             with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)) if config.amp.enable else nullcontext():
-                output_tensor = model.forward(micro_batch, device)
+                output_tensor = inner_model.forward(micro_batch, device)
 
             # Remember tensors for backward in all but last stage
             if world.num_stages > 1 and not world.is_last_stage: # Maybe don't optimize non-pipeline for comparability
@@ -216,7 +216,7 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
                 local_batch_loss += loss.detach().item()
                 
                 # Backward pass
-                input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, loss, None, device)
+                input_tensor_grad = inner_model.backward(input_tensor if not world.is_first_stage else None, loss, None, device)
                 training_comm.send_backward(dst=src, tensor=input_tensor_grad, metadata=(root, local_micro_step))
 
                 if world.is_first_stage: world.micro_step_done()
@@ -230,7 +230,7 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
             input_tensor, output_tensor = input_tensor.to(device), output_tensor.to(device)
 
             # Backward pass
-            input_tensor_grad = model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad, device)
+            input_tensor_grad = inner_model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad, device)
             training_comm.send_backward(dst=src, tensor=input_tensor_grad, metadata=(root, local_micro_step))
         
             if world.is_first_stage: world.micro_step_done()
@@ -239,18 +239,24 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
     if torch.cuda.is_available(): torch.cuda.synchronize()
     dist.barrier()
 
+    # Optimizer steps
+    logger.log_message(f"Step inner optimizer and scheduler", master=False, level=Level.DEBUG)
+    norm = torch.nn.utils.clip_grad_norm_(inner_model.parameters(), config.train.max_norm)
+    lr = scheduler.get_last_lr()[0]
+    inner_optimizer.step()
+    scheduler.step()
+
     # Sync gradients across ranks in same stage
     do_sync = (config.swarm.sync_every_n_steps > 0 and step % config.swarm.sync_every_n_steps == 0) or step == num_train_steps
     if do_sync:
-        logger.log_message(f"Syncing gradients", master=False, level=Level.DEBUG)
-        training_comm.sync_gradients(model)
-    
-    # Optimizer steps
-    logger.log_message(f"Step optimizer and scheduler", master=False, level=Level.DEBUG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.max_norm)
-    lr = scheduler.get_last_lr()[0]
-    optimizer.step()
-    scheduler.step()
+        logger.log_message(f"Computing pseudo gradient", master=False, level=Level.DEBUG)
+        pseudo_gradient = compute_pseudo_gradient(inner_model, outer_model)
+        logger.log_message(f"Syncing pseudo gradient", master=False, level=Level.DEBUG)
+        training_comm.sync_gradients(pseudo_gradient)
+        logger.log_message(f"Step outer optimizer", master=False, level=Level.DEBUG)
+        outer_optimizer.step()
+        logger.log_message(f"Syncing inner model", master=False, level=Level.DEBUG)
+        inner_model = sync_inner_model(outer_model, inner_model)
 
     # Timing
     step_time = time.time() - start
@@ -264,7 +270,7 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
 
     return local_outputs, stage_outputs
 
-def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, model: nn.Module, tokenizer: AutoTokenizer, train_dataloader: DataLoader, eval_dataloader: DataLoader, test_dataloader: DataLoader, loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, device: torch.device, config: SwarmConfig) -> Outputs:
+def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, inner_model: nn.Module, outer_model: nn.Module, tokenizer: AutoTokenizer, train_dataloader: DataLoader, eval_dataloader: DataLoader, test_dataloader: DataLoader, loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, device: torch.device, config: SwarmConfig) -> Outputs:
     # Initialize metrics
     local_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/local")
     global_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/global")
@@ -272,23 +278,23 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
     test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
     # Initialize training communication
-    training_shape = (config.train.micro_batch_size, config.data.seq_length, model.config.n_embd)
+    training_shape = (config.train.micro_batch_size, config.data.seq_length, inner_model.config.n_embd)
     training_comm = TrainingComm(world, training_shape, logger)
 
     # Initialize inference communication
     if config.sample.enable:
         prompt_length = tokenize(config.sample.prompt, tokenizer)["input_ids"].shape[1]
-        inference_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, model.config.n_embd)
+        inference_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, inner_model.config.n_embd)
         inference_comm = InferenceComm(world, inference_shape, logger)
 
     # Sample before training
     if config.sample.enable:
-        samples = sample_loop(0, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
+        samples = sample_loop(0, inner_model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
         logger.log_samples(samples, step=0)
 
     # Validate before training
     if config.eval.enable:
-        outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
+        outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=0, master=True)
 
     logger.log_message(f"Starting training", master=False, level=Level.DEBUG)
@@ -296,7 +302,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for step in train_range:
         batch = next(train_dataloader)
-        local_outputs, stage_outputs = train_step(step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config)
+        local_outputs, stage_outputs = train_step(step, num_train_steps, inner_model, outer_model, batch, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, training_comm, device, config)
 
         # Update local metrics
         local_train_metrics.update(local_outputs)
@@ -313,22 +319,22 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
 
         # Sample
         if config.sample.enable and config.sample.every_n_steps > 0 and step % config.sample.every_n_steps == 0:
-            samples = sample_loop(step, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
+            samples = sample_loop(step, inner_model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
             logger.log_samples(samples, step=step)
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and step % config.eval.every_n_steps == 0:
-            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
+            outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
             logger.log_metrics(outputs, step=step, master=True)
 
     # Test
     if config.eval.enable:
-        outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config)
+        outputs = eval_loop("test", num_test_steps, inner_model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=step, master=True)
 
     # Sample
     if config.sample.enable:
-        samples = sample_loop(step, model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
+        samples = sample_loop(step, inner_model, tokenizer, world, inference_comm, prompt_length, config.sample, device)
         logger.log_samples(samples, step=step)
 
 def main(config: SwarmConfig):
@@ -356,16 +362,19 @@ def main(config: SwarmConfig):
     logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}", master=True, level=Level.INFO)
 
     # Load model and create sharded version
-    model = get_model(config.model)
-    original_num_params = model.num_parameters()
-    logger.log_message(f"Loaded model ({format_int(model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
+    base_model = get_model(config.model)
+    logger.log_message(f"Loaded model ({format_int(base_model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
     
-    model = get_sharded_model(model, world)
-    if model.num_parameters() < original_num_params:
-        logger.log_message(f"Sharded model ({format_int(model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
+    inner_model = get_sharded_model(base_model, world)
+    if inner_model.num_parameters() < base_model.num_parameters():
+        logger.log_message(f"Sharded model ({format_int(inner_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
 
     # Initialize gradients (prevents sync issues when first evaluating)
-    initialize_gradients(model)
+    initialize_gradients(inner_model)
+
+    # Get outer model
+    outer_model = get_outer_model(inner_model)
+    logger.log_message(f"Initialized outer model ({format_int(outer_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
 
     # Load tokenizer
     tokenizer = get_tokenizer()
@@ -403,13 +412,14 @@ def main(config: SwarmConfig):
     logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]), master=True, level=Level.INFO)
 
     # Get optimizer and scheduler
-    optimizer = get_optimizer(model, config.train.optimizer)
-    scheduler = get_scheduler(optimizer, num_train_steps, config.train.scheduler)
+    inner_optimizer = get_optimizer(inner_model, config.train.inner_optimizer)
+    outer_optimizer = get_optimizer(outer_model, config.train.outer_optimizer)
+    scheduler = get_scheduler(inner_optimizer, num_train_steps, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
     logger.log_message("Initialized optimizer, scheduler and loss function", master=True, level=Level.INFO)
 
     # Training loop
-    train_loop(num_train_steps, num_eval_steps, num_test_steps, model, tokenizer, train_dataloader, eval_dataloader, test_dataloader, loss_fn, optimizer, scheduler, world, device, config)
+    train_loop(num_train_steps, num_eval_steps, num_test_steps, inner_model, outer_model, tokenizer, train_dataloader, eval_dataloader, test_dataloader, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, device, config)
 
     # Cleanup
     dist.barrier()

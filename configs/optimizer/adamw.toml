@@ -1,0 +1,2 @@
+type = "AdamW"
+lr = 6e-4

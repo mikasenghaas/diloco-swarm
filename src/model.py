@@ -8,8 +8,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from huggingface_hub import PyTorchModelHubMixin
-
 from src.world import World
 
 @dataclass
@@ -103,7 +101,7 @@ class TransformerBlock(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-class GPT2(nn.Module, PyTorchModelHubMixin):
+class GPT2(nn.Module):
     def __init__(self, config: GPT2Config):
         super().__init__()
         assert config.vocab_size is not None
@@ -159,57 +157,6 @@ class GPT2(nn.Module, PyTorchModelHubMixin):
             num_params -= self.transformer.wpe.weight.numel()
         return num_params
 
-    @classmethod
-    def from_hf(cls, hf_model, override_args=None):
-        model_type = hf_model.config._name_or_path.split("/")[-1]
-        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
-        override_args = override_args or {}
-        assert all(k == 'dropout' for k in override_args)
-
-        # Get the config from the model type
-        config_args = {
-            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
-            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
-            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
-        }[model_type]
-        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
-        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
-        config_args['bias'] = True # always True for GPT model checkpoints
-        if 'dropout' in override_args:
-            config_args['dropout'] = override_args['dropout']
-
-        # Create model
-        config = GPT2Config(**config_args)
-        model = GPT2(config)
-        
-        # Get all relevant keys from state dict
-        sd = model.state_dict()
-        sd_keys = [k for k in sd.keys() if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
-
-        # Get all relevant keys from the Hugging Face model
-        from transformers import GPT2LMHeadModel
-        hf_model = GPT2LMHeadModel.from_pretrained(model_type)
-        hf_sd = hf_model.state_dict()
-
-        # Copy parameters
-        hf_sd_keys = hf_sd.keys()
-        hf_sd_keys = [k for k in hf_sd_keys if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
-        hf_sd_keys = [k for k in hf_sd_keys if not k.endswith('.attn.bias')] # same, just the mask (buffer)
-        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        assert len(hf_sd_keys) == len(sd_keys), f"mismatched keys: {len(hf_sd_keys)} != {len(sd_keys)}"
-        for k in hf_sd_keys:
-            if any(k.endswith(w) for w in transposed): # Uses some 1D convolutions which we need to transpose
-                assert hf_sd[k].shape[::-1] == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(hf_sd[k].t())
-            else:
-                assert hf_sd[k].shape == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(hf_sd[k])
-
-        return model
-
     @torch.no_grad()
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: Optional[int] = None, eos_token_id: Optional[int] = None, **kwargs):
         for _ in range(max_new_tokens):
@@ -233,23 +180,22 @@ class ShardedGPT2(GPT2):
         self.__dict__.update(model.__dict__)
         
         # Setup sharded model
-        self.world = world
         self.transformer = nn.ModuleDict(dict(
-            wte = model.transformer.wte if self.world.is_first_stage else nn.Identity(),
-            wpe = model.transformer.wpe if self.world.is_first_stage else nn.Identity(),
-            drop = model.transformer.drop if self.world.is_first_stage else nn.Identity(),
-            h = nn.ModuleList([model.transformer.h[i] for i in self.distribute_layers(model.config.n_layer)]),
-            ln_f = model.transformer.ln_f if self.world.is_last_stage else nn.Identity(),
+            wte = model.transformer.wte if world.is_first_stage else nn.Identity(),
+            wpe = model.transformer.wpe if world.is_first_stage else nn.Identity(),
+            drop = model.transformer.drop if world.is_first_stage else nn.Identity(),
+            h = nn.ModuleList([model.transformer.h[i] for i in self.distribute_layers(world, model.config.n_layer)]),
+            ln_f = model.transformer.ln_f if world.is_last_stage else nn.Identity(),
         ))
-        self.lm_head = model.lm_head if self.world.is_last_stage else nn.Identity()
+        self.lm_head = model.lm_head if world.is_last_stage else nn.Identity()
         
         # Delete original model
         del model
 
-    def distribute_layers(self, num_layers):
-        layers_per_gpu = [num_layers // self.world.num_stages + (1 if i < num_layers % self.world.num_stages else 0) for i in range(self.world.num_stages)]
-        start_layer = sum(layers_per_gpu[:self.world.stage])
-        return list(range(start_layer, start_layer + layers_per_gpu[self.world.stage]))
+    def distribute_layers(self, world, num_layers):
+        layers_per_gpu = [num_layers // world.num_stages + (1 if i < num_layers % world.num_stages else 0) for i in range(world.num_stages)]
+        start_layer = sum(layers_per_gpu[:world.stage])
+        return list(range(start_layer, start_layer + layers_per_gpu[world.stage]))
 
     def forward(self, batch: Dict[str, torch.Tensor], device: torch.device) -> torch.Tensor:
         x = batch["hidden_states"].to(device) if batch["hidden_states"] is not None else self.encode_tokens(batch["input_ids"].to(device))

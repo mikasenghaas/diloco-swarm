@@ -19,7 +19,10 @@ class DataConfig(BaseConfig):
     subset_size: float = 1.0
 
 class OptimizerConfig(BaseConfig):
-    lr: float = 6e-4
+    type: Literal["SGD", "AdamW"]
+    lr: float
+    nesterov: bool = False
+    momentum: float = 0.9
     weight_decay: float = 0.1
     betas: list[float] = [0.9, 0.95]
     
@@ -43,9 +46,10 @@ class TrainConfig(BaseConfig):
     max_micro_batches: int = 1 # Maximum number of micro batches in memory
     seed: int = 42
     max_norm: float = 1.0
-    step_timeout: float = 60 # Timeout step after one minute (adjust to hardware!) TODO: Find bug that makes it timeout
-
-    optimizer: OptimizerConfig = OptimizerConfig()
+    step_timeout: float = 60 # Timeout step after one minute (adjust to hardware!)
+    
+    inner_optimizer: OptimizerConfig
+    outer_optimizer: OptimizerConfig
     scheduler: SchedulerConfig = SchedulerConfig()
 
 class EvalConfig(BaseConfig):

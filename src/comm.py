@@ -106,10 +106,12 @@ class TrainingComm():
         self.forward_recv_thread.load(tensor=None, metadata=metadata)
 
     def sync_gradients(self, model: nn.Module) -> None:
-        if len(self.world.stage2ranks[self.world.stage]) == 1: return
+        num_peers = len(self.world.stage2ranks[self.world.stage])
+        if num_peers == 1: return
         for param in model.parameters():
             if param.grad is None: param.grad = torch.zeros_like(param)
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=self.world.curr_stage_group)
+            param.grad /= num_peers
 
     def sync_outputs(self, outputs: Outputs) -> None:
         peers = self.world.stage2ranks[self.world.stage]

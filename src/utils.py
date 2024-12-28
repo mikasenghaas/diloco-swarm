@@ -1,4 +1,5 @@
 import os
+import copy
 import math
 import contextlib
 from typing import Optional, List, Dict, Tuple, Any, Generator
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.optim.lr_scheduler import LambdaLR
-from torch.optim import AdamW
+from torch.optim import Optimizer, AdamW, SGD
 
 from src.config import LoggingConfig, ModelConfig, DataConfig, OptimizerConfig, SchedulerConfig
 from src.logger import Logger
@@ -57,10 +58,15 @@ def get_tokenizer() -> AutoTokenizer:
     tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
-def get_optimizer(model: nn.Module | AutoModelForCausalLM, optimizer_config: OptimizerConfig) -> AdamW:
-    return AdamW(model.parameters(), lr=optimizer_config.lr, weight_decay=optimizer_config.weight_decay, betas=optimizer_config.betas)
+def get_optimizer(model: nn.Module | AutoModelForCausalLM, optimizer_config: OptimizerConfig) -> Optimizer:
+    if optimizer_config.type == "AdamW":
+        return AdamW(model.parameters(), lr=optimizer_config.lr, weight_decay=optimizer_config.weight_decay, betas=optimizer_config.betas)
+    elif optimizer_config.type == "SGD":
+        return SGD(model.parameters(), lr=optimizer_config.lr, momentum=optimizer_config.momentum, nesterov=optimizer_config.nesterov)
+    else:
+        raise ValueError(f"Invalid optimizer type: {optimizer_config.type}")
 
-def get_scheduler(optimizer: AdamW, num_steps: int, scheduler_config: SchedulerConfig) -> LambdaLR:
+def get_scheduler(optimizer: Optimizer, num_steps: int, scheduler_config: SchedulerConfig) -> LambdaLR:
     def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
@@ -184,3 +190,30 @@ def initialize_gradients(model):
 
 def nullcontext():
     return contextlib.nullcontext()
+
+"""
+Helpers need for inner-outer optimizer scheme for Diloco. The main idea is to use a CPU
+outer optimizer which has a copy of the model between outer steps. For H steps, we use
+a regular inner optimizer to update a local model. After H steps, we
+1. Compute the pseudo gradient as the difference between the outer and inner model
+2. Sync the pseudo gradient to the stage process group
+3. Update the outer model with the pseudo gradient
+4. Copy the outer model to the inner model
+"""
+
+def get_outer_model(inner_model: nn.Module) -> nn.Module:
+    """Initializes the outer model from the inner model"""
+    outer_model = copy.deepcopy(inner_model)
+    return outer_model.to("cpu")
+
+def compute_pseudo_gradient(inner_model: nn.Module, outer_model: nn.Module):
+    """Computes the pseudo gradient as the difference between the outer and inner model"""
+    for param_outer, param_inner in zip(outer_model.parameters(), inner_model.parameters()):
+        param_outer.grad = param_outer - param_inner
+    return outer_model
+
+def sync_inner_model(outer_model: nn.Module, inner_model: nn.Module):
+    """Syncs the inner model from the CPU outer model to GPU"""
+    for param_outer, param_inner in zip(outer_model.parameters(), inner_model.parameters()):
+        param_inner.data = param_outer.data.to(param_inner.device)
+    return inner_model

@@ -1,0 +1,3 @@
+type = "SGD"
+lr = 6e-4
+nesterov = true
