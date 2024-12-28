@@ -34,7 +34,6 @@ class SendThread:
         while True:
             if self.queue.empty(): time.sleep(self.TIMEOUT); continue
             dst, tensor, metadata = self.queue.get()
-            if self.logger: self.logger.log_message(f"Sent tensor to {dst} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
             if self.serialize: tensor = self.serializer.serialize(tensor, metadata)
             dist.send(tensor.to("cpu"), dst=dst, group=self.group, tag=self.tag)
 
@@ -59,14 +58,14 @@ class RecvThread:
         return self.queue.put((-1, tensor, metadata))
 
     def receive(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        return self.queue.get()
+        src, tensor, metadata = self.queue.get()
+        return src, tensor, metadata
 
     def _recv_loop(self):
         while True:
             tensor, metadata = torch.empty(self.shape, dtype=self.dtype, requires_grad=self.requires_grad), None
             src = dist.recv(tensor, group=self.group, tag=self.tag)
             if self.serialize: tensor, metadata = self.serializer.deserialize(tensor)
-            if self.logger: self.logger.log_message(f"Received tensor from {src} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
             self.queue.put((src, tensor, metadata))
 
 class TrainingComm():
@@ -90,17 +89,27 @@ class TrainingComm():
     def send_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_next_stage: return
         dst = random.choice(self.world.stage2ranks[self.world.stage + 1]) # Random next stage rank
+        if self.logger: self.logger.log_message(f"Sending forward to {dst} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
         self.forward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def send_backward(self, dst: int, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_prev_stage: return
+        if self.logger: self.logger.log_message(f"Sending backward to {dst} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
         self.backward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def recv_forward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        return self.forward_recv_thread.receive()
+        src, tensor, metadata = self.forward_recv_thread.receive()
+        if self.logger:
+            if tensor is not None:
+                self.logger.log_message(f"Receiving forward from {src} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
+            else:
+                self.logger.log_message(f"Receiving empty forward from {src} (metadata={metadata})", level=Level.DEBUG, master=False)
+        return src, tensor, metadata
 
     def recv_backward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        return self.backward_recv_thread.receive()
+        src, tensor, metadata = self.backward_recv_thread.receive()
+        if self.logger: self.logger.log_message(f"Receiving backward from {src} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
+        return src, tensor, metadata
 
     def load_forward(self, metadata: Metadata) -> None:
         self.forward_recv_thread.load(tensor=None, metadata=metadata)

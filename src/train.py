@@ -227,7 +227,6 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
 
             # Get input and output tensors
             src, input_tensor, output_tensor = input_output_tensors.pop((root, local_micro_step))
-            input_tensor, output_tensor = input_tensor.to(device), output_tensor.to(device)
 
             # Backward pass
             input_tensor_grad = inner_model.backward(input_tensor if not world.is_first_stage else None, output_tensor, output_tensor_grad, device)

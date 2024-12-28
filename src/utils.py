@@ -36,7 +36,7 @@ def get_hf_cache_dir() -> str:
     return os.path.join(persistent_dir, "huggingface")
 
 def get_device(device: Optional[str] = None, local_rank: Optional[int] = None) -> torch.device:
-    if device: return torch.device(device, local_rank if device == "cuda" else None)
+    if device: return torch.device(device)
     if torch.cuda.is_available():
         return torch.device("cuda", local_rank)
     return torch.device("cpu")
@@ -209,7 +209,7 @@ def get_outer_model(inner_model: nn.Module) -> nn.Module:
 def compute_pseudo_gradient(inner_model: nn.Module, outer_model: nn.Module):
     """Computes the pseudo gradient as the difference between the outer and inner model"""
     for param_outer, param_inner in zip(outer_model.parameters(), inner_model.parameters()):
-        param_outer.grad = param_outer - param_inner
+        param_outer.grad = param_outer - param_inner.to(param_outer.device)
     return outer_model
 
 def sync_inner_model(outer_model: nn.Module, inner_model: nn.Module):
