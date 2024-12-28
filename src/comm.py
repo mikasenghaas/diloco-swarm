@@ -129,14 +129,14 @@ class TrainingComm():
         dist.all_gather_object(all_outputs, outputs, group=self.world.curr_stage_group)
 
         return Outputs(
-            step=outputs.step,
-            time=outputs.time,
-            loss=sum([output.loss for output in all_outputs]),
-            tokens=sum([output.tokens for output in all_outputs]),
-            num_micro_batches=sum([output.num_micro_batches for output in all_outputs]),
-            lr=outputs.lr,
-            norm=outputs.norm,
-            micro_step_time=outputs.micro_step_time
+            step=outputs.step, # Same for all
+            tokens=sum([output.tokens for output in all_outputs]), # Sum across all
+            num_micro_batches=sum([output.num_micro_batches for output in all_outputs]), # Sum across all
+            time=sum([output.time for output in all_outputs]) / len(peers), # Average across all
+            loss=sum([output.loss for output in all_outputs]) / len(peers), # Average across all
+            lr=sum([output.lr for output in all_outputs]) / len(peers) if outputs.lr is not None else None, # Average across all, if exists
+            norm=sum([output.norm for output in all_outputs]) / len(peers) if outputs.norm is not None else None, # Average across all, if exists
+            micro_step_time=sum([output.micro_step_time for output in all_outputs]) / len(peers) if outputs.micro_step_time is not None else None # Average across all, if exists
         )
 
 class InferenceComm():

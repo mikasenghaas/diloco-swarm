@@ -150,8 +150,7 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
             eval_bar.set_description(get_eval_pbar_description(eval_metrics, prefix="[EVAL]" if eval_type == "eval" else "[TEST]"))
             eval_bar.update()
 
-    if world.is_master: eval_metrics = eval_metrics.compute()
-    return eval_metrics
+    return eval_metrics.compute()
 
 def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optional[Optimizer], scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Training step on train batch"""
@@ -162,6 +161,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
 
     # Setup step
     num_micro_steps = config.train.batch_size // config.train.micro_batch_size
+    num_micro_steps_per_device = num_micro_steps // (len(world.stage2ranks[world.num_stages-1])) # TODO: How to scale w/ heterogenity?
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     world.setup_step(step, num_micro_steps=num_micro_steps)
     micro_batches = {}
@@ -190,7 +190,6 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
             
             # Forward pass
             with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)) if config.amp.enable else nullcontext():
-                logger.log_message(f"{micro_batch['input_ids'].shape}, {micro_batch['input_ids'].device}", master=False, level=Level.DEBUG)
                 output_tensor = inner_model.forward(micro_batch, device)
 
             # Remember tensors for backward in all but last stage
@@ -210,7 +209,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
                 # Compute loss
                 logger.log_message(f"Computing local loss", master=False, level=Level.DEBUG)
                 loss = loss_fn(logits_filtered, targets_filtered)
-                loss = loss / num_micro_steps
+                loss = loss / num_micro_steps_per_device
                 
                 # Update statistics
                 local_batch_loss += loss.detach().item()
@@ -372,9 +371,8 @@ def main(config: SwarmConfig):
     logger.log_message(f"Initialized inner model ({format_int(base_model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
 
     # Get outer model
-    outer_model = None
-    # outer_model = get_outer_model(inner_model)
-    # logger.log_message(f"Initialized outer model {format_int(outer_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
+    outer_model = get_outer_model(inner_model)
+    logger.log_message(f"Initialized outer model {format_int(outer_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
 
     # Load tokenizer
     tokenizer = get_tokenizer()
@@ -388,9 +386,9 @@ def main(config: SwarmConfig):
 
     # Prepare dataset
     seq_length = config.data.seq_length + 1
-    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
-    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
-    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True)
+    train_data = train_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True, num_proc=8)
+    val_data = val_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True, num_proc=8)
+    test_data = test_data.map(lambda examples: tokenize(examples["text"], tokenizer, max_length=seq_length, return_tensors=None), batched=True, num_proc=8)
     logger.log_message(f"Tokenized dataset with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples", master=True, level=Level.INFO)
 
     # Setup training

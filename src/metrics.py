@@ -52,7 +52,7 @@ class Time(Metric):
         self.times.append(outputs.time)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.times[-1]}
+        return {"current": self.times[-1] if self.times else 0}
 
     def reset(self):
         self.times = []
@@ -67,7 +67,7 @@ class MicroTime(Metric):
         self.times.append(outputs.micro_step_time)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.times[-1]}
+        return {"current": self.times[-1] if self.times else 0}
 
     def reset(self):
         self.times = []
@@ -81,7 +81,7 @@ class Tokens(Metric):
         self.tokens.append(outputs.tokens)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.tokens[-1], "total": sum(self.tokens)}
+        return {"current": self.tokens[-1] if self.tokens else 0, "total": sum(self.tokens)}
 
     def reset(self):
         self.tokens = []
@@ -109,7 +109,7 @@ class Norm(Metric):
         self.norms.append(outputs.norm)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.norms[-1]}
+        return {"current": self.norms[-1] if self.norms else 0}
 
     def reset(self):
         self.norms = []
@@ -123,7 +123,7 @@ class Loss(Metric):
         self.losses.append(outputs.loss)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.losses[-1], "average": sum(self.losses) / len(self.losses)}
+        return {"current": self.losses[-1] if self.losses else 0, "average": sum(self.losses) / len(self.losses) if self.losses else 0}
 
     def reset(self):
         self.losses = []
@@ -137,7 +137,7 @@ class Perplexity(Metric):
         self.perplexities.append(math.exp(outputs.loss))
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.perplexities[-1], "average": sum(self.perplexities) / len(self.perplexities)}
+        return {"current": self.perplexities[-1] if self.perplexities else 0, "average": sum(self.perplexities) / len(self.perplexities) if self.perplexities else 0}
 
     def reset(self):
         self.perplexities = []
@@ -153,7 +153,7 @@ class Throughput(Metric):
         self.throughputs.append(throughput)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.throughputs[-1], "average": sum(self.throughputs) / len(self.throughputs)}
+        return {"current": self.throughputs[-1] if self.throughputs else 0, "average": sum(self.throughputs) / len(self.throughputs) if self.throughputs else 0}
 
     def reset(self):
         self.throughputs = []
@@ -167,7 +167,7 @@ class LearningRate(Metric):
         self.learning_rates.append(outputs.lr)
 
     def compute(self) -> Dict[str, float]:
-        return {"current": self.learning_rates[-1]}
+        return {"current": self.learning_rates[-1] if self.learning_rates else 0}
 
     def reset(self):
         self.learning_rates = []
