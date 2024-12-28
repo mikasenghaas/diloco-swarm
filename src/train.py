@@ -30,6 +30,7 @@ from src.utils import seed_everything, get_logger, get_device, get_dtype, get_mo
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, NumMicroBatches, Loss, Perplexity, Throughput, Norm, LearningRate
 
 logger = None
+timeout = 1e-4
 
 class SwarmConfig(BaseConfig):
     model: ModelConfig
@@ -55,7 +56,7 @@ def sample_loop(step: int, model: nn.Module, tokenizer: AutoTokenizer, world: Wo
 
     generated_id = prompt_length; world.setup_step(step, num_micro_steps=config.max_new_tokens, type="sample")
     while world.is_leader and not world.is_step_done(step, type="sample"):
-        if not inference_comm.recv_thread.can_receive: time.sleep(1e-4); continue
+        if not inference_comm.recv_thread.can_receive: time.sleep(timeout); continue
         tensor_type, input_tensor = inference_comm.receive()
         micro_batch[tensor_type] = input_tensor
         output_tensor = model.forward(micro_batch, device)
@@ -79,6 +80,7 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     model.to(device); model.eval()
 
     # Setup step
+    num_micro_steps = 1
     world.setup_step(step, num_micro_steps=1, type=eval_type) # Assume batch size = micro batch size
     micro_batches = {}
     for rank, local_micro_step, micro_batch in get_micro_batches(batch, len(batch), world):
@@ -90,37 +92,41 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
     logger.log_message(f"{eval_type.capitalize()} step {step}", master=False, level=Level.DEBUG)
     while not world.is_step_done(step, type=eval_type):
-        if training_comm.forward_recv_thread.can_receive:
-            # Receive input tensor
-            _, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
-            micro_batch = micro_batches[(root, local_micro_step)]
-            micro_batch["hidden_states"] = input_tensor
+        if not (training_comm.forward_recv_thread.can_receive): time.sleep(timeout); continue
+        # Receive input tensor
+        _, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
+        micro_batch = micro_batches[(root, local_micro_step)]
+        micro_batch["hidden_states"] = input_tensor
+
+        # Update statistics
+        local_batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
+        local_num_micro_batches += 1
+
+        # Forward pass
+        logger.log_message(f"Forward pass", master=False, level=Level.DEBUG)
+        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
+            output_tensor = model.forward(micro_batch, device)
+        logger.log_message(f"Forward pass done, {output_tensor.shape}", master=False, level=Level.DEBUG)
+
+        # Send output tensor
+        training_comm.send_forward(tensor=output_tensor, metadata=(root, local_micro_step))
+
+        if world.is_last_stage:
+            # Filter logits and targets
+            attention_mask, target_ids = micro_batch["attention_mask"].to(device), micro_batch["target_ids"].to(device)
+            logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, attention_mask)
+
+            # Compute loss
+            loss = loss_fn(logits_filtered, targets_filtered)
+            loss = loss / num_micro_steps
 
             # Update statistics
-            local_batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
-            local_num_micro_batches += 1
+            local_batch_loss += loss.detach().item()
 
-            # Forward pass
-            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
-                output_tensor = model.forward(micro_batch, device)
-
-            # Send output tensor
-            training_comm.send_forward(tensor=output_tensor, metadata=(root, local_micro_step))
-
-            if world.is_last_stage:
-                # Filter logits and targets
-                attention_mask, target_ids = micro_batch["attention_mask"].to(device), micro_batch["target_ids"].to(device)
-                logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, attention_mask)
-
-                # Compute loss
-                loss = loss_fn(logits_filtered, targets_filtered)
-
-                # Update statistics
-                local_batch_loss += loss.detach().item()
-
-                world.micro_step_done(eval_type)
+            world.micro_step_done(eval_type)
 
     # Timing
+    logger.log_message(f"{eval_type.capitalize()} step {step} done", master=False, level=Level.DEBUG)
     if torch.cuda.is_available(): torch.cuda.synchronize()
     step_time = time.time() - start
 
@@ -167,11 +173,11 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
     # Start training step
     local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
     input_output_tensors = {}
-    logger.log_message(f"Train step {step}", master=False, level=Level.DEBUG)
+    logger.log_message(f"Train step {step} ({num_micro_steps} micro steps)", master=False, level=Level.DEBUG)
     while True:
         if world.is_step_done(step): break
         if time.time() - start > train_config.step_timeout: logger.log_message(f"Train step {step} timed out", master=False, level=Level.WARNING); break
-        if not (training_comm.forward_recv_thread.can_receive or training_comm.backward_recv_thread.can_receive): time.sleep(1e-4); continue
+        if not (training_comm.forward_recv_thread.can_receive or training_comm.backward_recv_thread.can_receive): time.sleep(timeout); continue
         if training_comm.forward_recv_thread.can_receive and len(input_output_tensors) < train_config.max_micro_batches:
             # Receive input tensor
             src, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
@@ -228,6 +234,7 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
         
     # Synchronize
     if torch.cuda.is_available(): torch.cuda.synchronize()
+    dist.barrier()
 
     # Sync gradients across ranks in same stage
     do_sync = (swarm_config.sync_every_n_steps > 0 and step % swarm_config.sync_every_n_steps == 0) or step == num_train_steps
@@ -269,7 +276,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
     if config.sample.enable:
         prompt_length = tokenize(config.sample.prompt, tokenizer)["input_ids"].shape[1]
         inference_shape = (config.sample.num_samples, prompt_length+config.sample.max_new_tokens, model.config.n_embd)
-        inference_comm = InferenceComm(world, inference_shape)
+        inference_comm = InferenceComm(world, inference_shape, logger)
 
     # Sample before training
     if config.sample.enable:

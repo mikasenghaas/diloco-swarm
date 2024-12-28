@@ -23,7 +23,7 @@ class SendThread:
     TIMEOUT = 1e-4
     def __init__(self, shape: Tuple[int, ...], group: dist.ProcessGroup, tag: int = 0, serialize: bool = True, start: bool = True, **kwargs):
         self.shape, self.group, self.tag, self.serialize = shape, group, tag, serialize
-        self.queue = Queue()
+        self.logger, self.queue = kwargs.get("logger"), Queue()
         if serialize: self.serializer = Serializer(shape); self.shape = self.serializer.shape
         if start: threading.Thread(target=self._send_loop, daemon=True).start()
 
@@ -34,6 +34,7 @@ class SendThread:
         while True:
             if self.queue.empty(): time.sleep(self.TIMEOUT); continue
             dst, tensor, metadata = self.queue.get()
+            if self.logger: self.logger.log_message(f"Sent tensor to {dst} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
             if self.serialize: tensor = self.serializer.serialize(tensor, metadata)
             dist.send(tensor.to("cpu"), dst=dst, group=self.group, tag=self.tag)
 
@@ -46,7 +47,7 @@ class RecvThread:
     """
     def __init__(self, shape: Tuple[int, ...], group: dist.ProcessGroup, tag: int = 0, requires_grad: bool = True, dtype: torch.dtype = torch.float32, serialize: bool = True, start: bool = True, **kwargs):
         self.shape, self.group, self.tag, self.requires_grad, self.dtype, self.serialize = shape, group, tag, requires_grad, dtype, serialize
-        self.queue = Queue()
+        self.logger, self.queue = kwargs.get("logger"), Queue()
         if serialize: self.serializer = Serializer(shape); self.shape = self.serializer.shape
         if start: threading.Thread(target=self._recv_loop, daemon=True).start()
 
@@ -55,6 +56,7 @@ class RecvThread:
         return not self.queue.empty()
 
     def load(self, tensor: torch.Tensor, metadata: Optional[Metadata]) -> None:
+        if self.logger: self.logger.log_message(f"Loading tensor (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
         return self.queue.put((-1, tensor, metadata))
 
     def receive(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
@@ -65,6 +67,7 @@ class RecvThread:
             tensor, metadata = torch.empty(self.shape, dtype=self.dtype, requires_grad=self.requires_grad), None
             src = dist.recv(tensor, group=self.group, tag=self.tag)
             if self.serialize: tensor, metadata = self.serializer.deserialize(tensor)
+            if self.logger: self.logger.log_message(f"Received tensor from {src} (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
             self.queue.put((src, tensor, metadata))
 
 class TrainingComm():
@@ -79,7 +82,7 @@ class TrainingComm():
     """
     def __init__(self, world: World, shape: Tuple[int, ...], logger: Logger):
         self.world, self.shape, self.logger = world, shape, logger
-        training_kwargs = {"tag": 0, "serialize": True, "requires_grad": True}
+        training_kwargs = {"tag": 0, "serialize": True, "requires_grad": True, "logger": logger}
         self.forward_send_thread = SendThread(shape, group=self.world.next_stage_group, start=self.world.has_next_stage, **training_kwargs)
         self.backward_recv_thread = RecvThread(shape, group=self.world.next_stage_group, start=self.world.has_next_stage, **training_kwargs)
         self.backward_send_thread = SendThread(shape, group=self.world.prev_stage_group, start=self.world.has_prev_stage, **training_kwargs)
@@ -88,24 +91,19 @@ class TrainingComm():
     def send_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_next_stage: return
         dst = random.choice(self.world.stage2ranks[self.world.stage + 1]) # Random next stage rank
-        self.logger.log_message(f"[Rank {self.world.rank}] Sending {tensor.shape} with metadata {metadata} forward to {dst}", level=Level.DEBUG, master=False)
         self.forward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def send_backward(self, dst: int, tensor: torch.Tensor, metadata: Metadata) -> None:
         if not self.world.has_prev_stage: return
-        self.logger.log_message(f"[Rank {self.world.rank}] Sending {tensor.shape} with metadata {metadata} backward to {dst}", level=Level.DEBUG, master=False)
         self.backward_send_thread.send(dst=dst, tensor=tensor, metadata=metadata)
 
     def recv_forward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        self.logger.log_message(f"[Rank {self.world.rank}] Receiving forward", level=Level.DEBUG, master=False)
         return self.forward_recv_thread.receive()
 
     def recv_backward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
-        self.logger.log_message(f"[Rank {self.world.rank}] Receiving backward", level=Level.DEBUG, master=False)
         return self.backward_recv_thread.receive()
 
     def load_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
-        self.logger.log_message(f"[Rank {self.world.rank}] Loading forward", level=Level.DEBUG, master=False)
         self.forward_recv_thread.load(tensor=tensor, metadata=metadata)
 
     def sync_gradients(self, model: nn.Module) -> None:
@@ -139,9 +137,9 @@ class InferenceComm():
     the last stage communicates input ids int64 tensors of shape (sample_size,
     seq_len). Tensor are not serialized.
     """
-    def __init__(self, world: World, shape: Tuple[int, ...]):
-        self.world, self.shape = world, shape
-        inference_kwargs = {"tag": 1, "serialize": False, "requires_grad": False, "start": True}
+    def __init__(self, world: World, shape: Tuple[int, ...], logger: Logger):
+        self.world, self.shape, self.logger = world, shape, logger
+        inference_kwargs = {"tag": 1, "serialize": False, "requires_grad": False, "start": True, "logger": logger}
         if not self.world.is_leader: return
         if self.world.is_first_stage:
             self.send_thread = SendThread(self.shape, group=self.world.next_stage_group, **inference_kwargs)

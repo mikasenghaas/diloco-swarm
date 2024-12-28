@@ -74,6 +74,7 @@ class World:
         if self.is_master:
             self.store.set(f"{type}_step", str(step))
             self.store.set(f"{type}_micro_steps_left", str(num_micro_steps))
+        dist.barrier()
 
     def micro_step_done(self, type: str = "train") -> None:
         self.store.add(f"{type}_micro_steps_left", -1)
