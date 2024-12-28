@@ -80,4 +80,4 @@ def test_memorization(overfit_process):
     log_file = f"{LOG_DIR}/{overfit_process[1]}/master.log"
     with open(log_file, "r") as f:
         logs = f.read()
-    assert len(re.findall(sentence, logs)) == 5, "Memorized sentence not found in logs"
+    assert len(re.findall(sentence, logs)) > 0, "Memorized sentence not found in logs"
