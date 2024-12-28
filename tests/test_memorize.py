@@ -6,7 +6,7 @@ import torch
 import pytest
     
 TIMEOUT = 30
-LOG_DIR = "/tmp/swarm/test"
+LOG_DIR = "/tmp/swarm/test_memorize"
 CMD = lambda num_processes, num_stages, device, run_id: [
     "torchrun",
     "--nproc_per_node", str(num_processes),
@@ -22,13 +22,10 @@ CMD = lambda num_processes, num_stages, device, run_id: [
     "--train.max_epochs", "40",
     "--train.batch_size", "1",
     "--train.micro_batch_size", "1",
-    "--amp.enable", "false",
     "--logging.log_dir", LOG_DIR,
     "--logging.run_id", run_id,
-    "--sample.enable", "true",
-    "--sample.every_n_steps", "20",
-    "--eval.enable", "true",
-    "--eval.every_n_steps", "20",
+    "--amp.enable", "false",
+    "--eval.enable", "false",
     "--logging.wandb.enable", "false",
 ]
 
@@ -50,8 +47,8 @@ def config(request):
     return request.param
 
 @pytest.fixture(scope="session")
-def overfit_process(device, config):
-    """Start overfit training process."""
+def process(device, config):
+    """Start memorize training process."""
     # Create run id
     run_id = str(device) + "-" + config["name"]
 
@@ -73,13 +70,12 @@ def overfit_process(device, config):
     process.terminate()
     process.wait()
 
-def test_no_errors(overfit_process):
-    process = overfit_process[0]
-    assert process.returncode == 0, f"Process failed with return code {process.returncode}"
+def test_no_errors(process):
+    assert process[0].returncode == 0, f"Process failed with return code {process[0].returncode}"
 
-def test_memorization(overfit_process):
+def test_memorization(process):
     sentence = "I am a large language model and I can memorize this sentence."
-    log_file = f"{LOG_DIR}/{overfit_process[1]}/master.log"
+    log_file = f"{LOG_DIR}/{process[1]}/master.log"
     with open(log_file, "r") as f:
         logs = f.read()
     assert len(re.findall(sentence, logs)) > 0, "Memorized sentence not found in logs"

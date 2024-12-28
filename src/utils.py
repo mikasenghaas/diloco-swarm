@@ -209,11 +209,9 @@ def get_outer_model(inner_model: nn.Module) -> nn.Module:
 def compute_pseudo_gradient(inner_model: nn.Module, outer_model: nn.Module):
     """Computes the pseudo gradient as the difference between the outer and inner model"""
     for param_outer, param_inner in zip(outer_model.parameters(), inner_model.parameters()):
-        param_outer.grad = param_outer - param_inner.to(param_outer.device)
-    return outer_model
+        param_outer.grad = (param_outer.data - param_inner.to(param_outer.device).data).clone()
 
 def sync_inner_model(outer_model: nn.Module, inner_model: nn.Module):
     """Syncs the inner model from the CPU outer model to GPU"""
     for param_outer, param_inner in zip(outer_model.parameters(), inner_model.parameters()):
-        param_inner.data = param_outer.data.to(param_inner.device)
-    return inner_model
+        param_inner.data.copy_(param_outer.detach().to(param_inner.device))

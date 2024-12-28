@@ -80,11 +80,11 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     model.to(device); model.eval()
 
     # Setup step
-    num_micro_steps = 1
+    num_micro_steps = 1 # Assuming batch_size == micro_batch_size
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     world.setup_step(step, num_micro_steps=1, type=eval_type) # Assume batch size = micro batch size
     micro_batches = {}
-    for rank, local_micro_step, micro_batch in get_micro_batches(batch, len(batch), world):
+    for rank, local_micro_step, micro_batch in get_micro_batches(batch, config.train.micro_batch_size, world):
         micro_batches[(rank, local_micro_step)] = micro_batch
         if world.is_first_stage and rank == world.rank:
             training_comm.load_forward(metadata=(rank, local_micro_step))
@@ -104,10 +104,8 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
         local_batch_tokens += tokens_per_micro_batch
 
         # Forward pass
-        logger.log_message(f"Forward pass", master=False, level=Level.DEBUG)
         with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)) if config.amp.enable else nullcontext():
             output_tensor = model.forward(micro_batch, device)
-        logger.log_message(f"Forward pass done, {output_tensor.shape}", master=False, level=Level.DEBUG)
 
         # Send output tensor
         training_comm.send_forward(tensor=output_tensor, metadata=(root, local_micro_step))
@@ -192,6 +190,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
             
             # Forward pass
             with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)) if config.amp.enable else nullcontext():
+                logger.log_message(f"{micro_batch['input_ids'].shape}, {micro_batch['input_ids'].device}", master=False, level=Level.DEBUG)
                 output_tensor = inner_model.forward(micro_batch, device)
 
             # Remember tensors for backward in all but last stage
@@ -209,6 +208,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
                 logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, mask)
                 
                 # Compute loss
+                logger.log_message(f"Computing local loss", master=False, level=Level.DEBUG)
                 loss = loss_fn(logits_filtered, targets_filtered)
                 loss = loss / num_micro_steps
                 
@@ -254,13 +254,13 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
     # Sync gradients across ranks in same stage
     if do_sync and outer_optimizer is not None:
         logger.log_message(f"Computing pseudo gradient", master=False, level=Level.DEBUG)
-        pseudo_gradient = compute_pseudo_gradient(inner_model, outer_model)
+        compute_pseudo_gradient(inner_model, outer_model)
         logger.log_message(f"Syncing pseudo gradient", master=False, level=Level.DEBUG)
-        training_comm.sync_gradients(pseudo_gradient)
+        training_comm.sync_gradients(outer_model)
         logger.log_message(f"Step outer optimizer", master=False, level=Level.DEBUG)
         outer_optimizer.step()
         logger.log_message(f"Syncing inner model", master=False, level=Level.DEBUG)
-        inner_model = sync_inner_model(outer_model, inner_model)
+        sync_inner_model(outer_model, inner_model)
 
     # Timing
     step_time = time.time() - start
@@ -303,7 +303,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, i
 
     logger.log_message(f"Starting training", master=False, level=Level.DEBUG)
     train_range = range(1, num_train_steps + 1)
-    train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
+    train_bar = tqdm(train_range, position=0, leave=False) if world.is_master else None
     for step in train_range:
         batch = next(train_dataloader)
         local_outputs, stage_outputs = train_step(step, num_train_steps, inner_model, outer_model, batch, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, training_comm, device, config)
@@ -365,20 +365,16 @@ def main(config: SwarmConfig):
     torch.set_float32_matmul_precision(config.amp.precision)
     logger.log_message(f"Using precision: {torch.get_float32_matmul_precision()}", master=True, level=Level.INFO)
 
-    # Load model and create sharded version
+    # Load inner model
     base_model = get_model(config.model)
-    logger.log_message(f"Loaded model ({format_int(base_model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
-    
     inner_model = get_sharded_model(base_model, world)
-    if inner_model.num_parameters() < base_model.num_parameters():
-        logger.log_message(f"Sharded model ({format_int(inner_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
-
-    # Initialize gradients (prevents sync issues when first evaluating)
     initialize_gradients(inner_model)
+    logger.log_message(f"Initialized inner model ({format_int(base_model.num_parameters(), 2)} parameters)", master=True, level=Level.INFO)
 
     # Get outer model
-    outer_model = get_outer_model(inner_model)
-    logger.log_message(f"Initialized outer model ({format_int(outer_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
+    outer_model = None
+    # outer_model = get_outer_model(inner_model)
+    # logger.log_message(f"Initialized outer model {format_int(outer_model.num_parameters(), 2)} parameters)", master=False, level=Level.INFO)
 
     # Load tokenizer
     tokenizer = get_tokenizer()
