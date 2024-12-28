@@ -73,7 +73,7 @@ def sample_loop(step: int, model: nn.Module, tokenizer: AutoTokenizer, world: Wo
 
     return [tokenizer.decode(generated_ids, skip_special_tokens=True) for generated_ids in input_ids]
 
-def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, training_comm: TrainingComm, amp_config: AmpConfig) -> Outputs:
+def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, device: torch.device, world: World, training_comm: TrainingComm, config: SwarmConfig) -> Outputs:
     """Evaluation step on eval batch"""
     # Prepare model
     start = time.time()
@@ -81,12 +81,13 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
     # Setup step
     num_micro_steps = 1
+    tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     world.setup_step(step, num_micro_steps=1, type=eval_type) # Assume batch size = micro batch size
     micro_batches = {}
     for rank, local_micro_step, micro_batch in get_micro_batches(batch, len(batch), world):
         micro_batches[(rank, local_micro_step)] = micro_batch
         if world.is_first_stage and rank == world.rank:
-            training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
+            training_comm.load_forward(metadata=(rank, local_micro_step))
     
     # Start evaluation step
     local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
@@ -99,12 +100,12 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
         micro_batch["hidden_states"] = input_tensor
 
         # Update statistics
-        local_batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
         local_num_micro_batches += 1
+        local_batch_tokens += tokens_per_micro_batch
 
         # Forward pass
         logger.log_message(f"Forward pass", master=False, level=Level.DEBUG)
-        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
+        with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)) if config.amp.enable else nullcontext():
             output_tensor = model.forward(micro_batch, device)
         logger.log_message(f"Forward pass done, {output_tensor.shape}", master=False, level=Level.DEBUG)
 
@@ -137,14 +138,14 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     return local_outputs, stage_outputs
 
 @torch.no_grad()
-def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, train_config: TrainConfig) -> Outputs:
+def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
     eval_range = range(1, num_eval_steps + 1)
     eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_leader and world.is_last_stage else None
     eval_metrics.reset()
     for step in eval_range:
         batch = next(eval_dataloader)
-        _, stage_outputs = eval_step(step, eval_type, model, batch, loss_fn, device, world, training_comm, train_config)
+        _, stage_outputs = eval_step(step, eval_type, model, batch, loss_fn, device, world, training_comm, config)
         
         if world.is_master:
             eval_metrics.update(stage_outputs)
@@ -154,7 +155,7 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
     if world.is_master: eval_metrics = eval_metrics.compute()
     return eval_metrics
 
-def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, swarm_config: SwarmConfig, train_config: TrainConfig, amp_config: AmpConfig) -> Outputs:
+def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, optimizer: AdamW, scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
@@ -162,13 +163,14 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
     optimizer.zero_grad()
 
     # Setup step
-    num_micro_steps = train_config.batch_size // train_config.micro_batch_size
+    num_micro_steps = config.train.batch_size // config.train.micro_batch_size
+    tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     world.setup_step(step, num_micro_steps=num_micro_steps)
     micro_batches = {}
-    for rank, local_micro_step, micro_batch in get_micro_batches(batch, train_config.micro_batch_size, world):
+    for rank, local_micro_step, micro_batch in get_micro_batches(batch, config.train.micro_batch_size, world):
         micro_batches[(rank, local_micro_step)] = micro_batch
         if world.is_first_stage and rank == world.rank:
-            training_comm.load_forward(tensor=micro_batch["input_ids"], metadata=(rank, local_micro_step))
+            training_comm.load_forward(metadata=(rank, local_micro_step))
 
     # Start training step
     local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
@@ -176,9 +178,9 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
     logger.log_message(f"Train step {step} ({num_micro_steps} micro steps)", master=False, level=Level.DEBUG)
     while True:
         if world.is_step_done(step): break
-        if time.time() - start > train_config.step_timeout: logger.log_message(f"Train step {step} timed out", master=False, level=Level.WARNING); break
+        if time.time() - start > config.train.step_timeout: logger.log_message(f"Train step {step} timed out", master=False, level=Level.WARNING); break
         if not (training_comm.forward_recv_thread.can_receive or training_comm.backward_recv_thread.can_receive): time.sleep(timeout); continue
-        if training_comm.forward_recv_thread.can_receive and len(input_output_tensors) < train_config.max_micro_batches:
+        if training_comm.forward_recv_thread.can_receive and len(input_output_tensors) < config.train.max_micro_batches:
             # Receive input tensor
             src, input_tensor, (root, local_micro_step) = training_comm.recv_forward()
             micro_batch = micro_batches[(root, local_micro_step)]
@@ -186,15 +188,16 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
 
             # Update statistics
             local_num_micro_batches += 1
-            local_batch_tokens += input_tensor.shape[0] * input_tensor.shape[1]
+            local_batch_tokens += tokens_per_micro_batch
             
             # Forward pass
-            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(amp_config.dtype)) if amp_config.enable else nullcontext():
+            with torch.amp.autocast(device_type=device.type, dtype=get_dtype(config.amp.dtype)) if config.amp.enable else nullcontext():
                 output_tensor = model.forward(micro_batch, device)
 
             # Remember tensors for backward in all but last stage
             if world.num_stages > 1 and not world.is_last_stage: # Maybe don't optimize non-pipeline for comparability
                 logger.log_message(f"Offloading input and output tensors to CPU", master=False, level=Level.DEBUG)
+                if input_tensor is None: input_tensor = micro_batch["input_ids"]
                 input_output_tensors[(root, local_micro_step)] = (src, input_tensor, output_tensor)
 
             # Send output tensor
@@ -237,14 +240,14 @@ def train_step(step: int, num_train_steps: int, model: nn.Module, batch: Dict[st
     dist.barrier()
 
     # Sync gradients across ranks in same stage
-    do_sync = (swarm_config.sync_every_n_steps > 0 and step % swarm_config.sync_every_n_steps == 0) or step == num_train_steps
+    do_sync = (config.swarm.sync_every_n_steps > 0 and step % config.swarm.sync_every_n_steps == 0) or step == num_train_steps
     if do_sync:
         logger.log_message(f"Syncing gradients", master=False, level=Level.DEBUG)
         training_comm.sync_gradients(model)
     
     # Optimizer steps
     logger.log_message(f"Step optimizer and scheduler", master=False, level=Level.DEBUG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_norm)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.max_norm)
     lr = scheduler.get_last_lr()[0]
     optimizer.step()
     scheduler.step()
@@ -285,7 +288,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
 
     # Validate before training
     if config.eval.enable:
-        outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config.amp)
+        outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=0, master=True)
 
     logger.log_message(f"Starting training", master=False, level=Level.DEBUG)
@@ -293,7 +296,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_leader and world.is_last_stage else None
     for step in train_range:
         batch = next(train_dataloader)
-        local_outputs, stage_outputs = train_step(step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config.swarm, config.train, config.amp)
+        local_outputs, stage_outputs = train_step(step, num_train_steps, model, batch, loss_fn, optimizer, scheduler, world, training_comm, device, config)
 
         # Update local metrics
         local_train_metrics.update(local_outputs)
@@ -315,12 +318,12 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, m
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and step % config.eval.every_n_steps == 0:
-            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config.amp)
+            outputs = eval_loop("eval", num_eval_steps, model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
             logger.log_metrics(outputs, step=step, master=True)
 
     # Test
     if config.eval.enable:
-        outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config.amp)
+        outputs = eval_loop("test", num_test_steps, model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=step, master=True)
 
     # Sample

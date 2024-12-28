@@ -55,8 +55,7 @@ class RecvThread:
     def can_receive(self) -> bool:
         return not self.queue.empty()
 
-    def load(self, tensor: torch.Tensor, metadata: Optional[Metadata]) -> None:
-        if self.logger: self.logger.log_message(f"Loading tensor (shape={tensor.shape}, dtype={tensor.dtype}, device={tensor.device}, metadata={metadata})", level=Level.DEBUG, master=False)
+    def load(self, tensor: Optional[torch.Tensor], metadata: Optional[Metadata]) -> None:
         return self.queue.put((-1, tensor, metadata))
 
     def receive(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
@@ -103,8 +102,8 @@ class TrainingComm():
     def recv_backward(self) -> Tuple[int, torch.Tensor, Optional[Metadata]]:
         return self.backward_recv_thread.receive()
 
-    def load_forward(self, tensor: torch.Tensor, metadata: Metadata) -> None:
-        self.forward_recv_thread.load(tensor=tensor, metadata=metadata)
+    def load_forward(self, metadata: Metadata) -> None:
+        self.forward_recv_thread.load(tensor=None, metadata=metadata)
 
     def sync_gradients(self, model: nn.Module) -> None:
         if len(self.world.stage2ranks[self.world.stage]) == 1: return
