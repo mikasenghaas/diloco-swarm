@@ -19,7 +19,7 @@ class DataConfig(BaseConfig):
     subset_size: float = 1.0
 
 class OptimizerConfig(BaseConfig):
-    type: Literal["SGD", "AdamW"]
+    type: Literal["SGD", "AdamW", "None"]
     lr: float
     nesterov: bool = False
     momentum: float = 0.9

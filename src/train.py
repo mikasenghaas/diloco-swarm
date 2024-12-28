@@ -10,7 +10,7 @@ import autorootcwd
 
 import time
 from tqdm import tqdm
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,7 @@ from transformers import AutoTokenizer
 from src.logger import Level
 from src.world import World
 from src.comm import TrainingComm, InferenceComm
-from src.config import SwarmConfig, ModelConfig, DataConfig, OptimizerConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig, AmpConfig
+from src.config import SwarmConfig, ModelConfig, DataConfig, TrainConfig, EvalConfig, SampleConfig, LoggingConfig, AmpConfig
 from src.utils import seed_everything, get_logger, get_device, get_dtype, get_model, get_sharded_model, initialize_gradients, get_tokenizer, get_dataset, tokenize, get_dataloader, get_micro_batches, get_optimizer, get_scheduler, get_num_steps, get_train_setup, format_int, format_float, get_train_pbar_description, get_eval_pbar_description, filter_logits_targets, nullcontext, get_outer_model, compute_pseudo_gradient, sync_inner_model
 from src.metrics import Outputs, Metrics, Step, Time, MicroTime, Tokens, NumMicroBatches, Loss, Perplexity, Throughput, Norm, LearningRate
 
@@ -155,7 +155,7 @@ def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn
     if world.is_master: eval_metrics = eval_metrics.compute()
     return eval_metrics
 
-def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
+def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_model: nn.Module, batch: Dict[str, torch.Tensor], loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optional[Optimizer], scheduler: LambdaLR, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Training step on train batch"""
     # Prepare model
     start = time.time()
@@ -239,6 +239,12 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
     if torch.cuda.is_available(): torch.cuda.synchronize()
     dist.barrier()
 
+    # Sync gradients 
+    do_sync = (config.swarm.sync_every_n_steps > 0 and step % config.swarm.sync_every_n_steps == 0) or step == num_train_steps
+    if do_sync and outer_optimizer is None:
+        logger.log_message(f"No outer optimizer, syncing gradients directly", master=False, level=Level.DEBUG)
+        training_comm.sync_gradients(inner_model)
+
     # Optimizer steps
     logger.log_message(f"Step inner optimizer and scheduler", master=False, level=Level.DEBUG)
     norm = torch.nn.utils.clip_grad_norm_(inner_model.parameters(), config.train.max_norm)
@@ -247,8 +253,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
     scheduler.step()
 
     # Sync gradients across ranks in same stage
-    do_sync = (config.swarm.sync_every_n_steps > 0 and step % config.swarm.sync_every_n_steps == 0) or step == num_train_steps
-    if do_sync:
+    if do_sync and outer_optimizer is not None:
         logger.log_message(f"Computing pseudo gradient", master=False, level=Level.DEBUG)
         pseudo_gradient = compute_pseudo_gradient(inner_model, outer_model)
         logger.log_message(f"Syncing pseudo gradient", master=False, level=Level.DEBUG)
@@ -413,7 +418,9 @@ def main(config: SwarmConfig):
 
     # Get optimizer and scheduler
     inner_optimizer = get_optimizer(inner_model, config.train.inner_optimizer)
-    outer_optimizer = get_optimizer(outer_model, config.train.outer_optimizer)
+    outer_optimizer = None
+    if config.train.outer_optimizer.type != "None":
+        outer_optimizer = get_optimizer(outer_model, config.train.outer_optimizer)
     scheduler = get_scheduler(inner_optimizer, num_train_steps, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
     logger.log_message("Initialized optimizer, scheduler and loss function", master=True, level=Level.INFO)
