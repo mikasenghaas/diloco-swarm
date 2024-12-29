@@ -98,13 +98,11 @@ def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = Non
 
 def get_dataloader(dataset: Dataset, batch_size: int, tokenizer: AutoTokenizer, seq_length: int, shuffle: bool, cycle: bool = True) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        batch = [tokenize(item["text"], tokenizer, max_length=seq_length, return_tensors=None) for item in batch]
-        batch_input_ids = torch.stack([torch.tensor(item['input_ids']) for item in batch])
-        batch_attention_mask = torch.stack([torch.tensor(item['attention_mask']) for item in batch])
+        batch = tokenizer([item["text"] for item in batch], max_length=seq_length, truncation=True, padding="max_length", return_tensors="pt")
         return {
-            "input_ids": batch_input_ids[:, :-1].contiguous(),
-            "target_ids": batch_input_ids[:, 1:].contiguous(),
-            "attention_mask": batch_attention_mask[:, :-1].contiguous(),
+            "input_ids": batch["input_ids"][:, :-1].contiguous(),
+            "target_ids": batch["input_ids"][:, 1:].contiguous(),
+            "attention_mask": batch["attention_mask"][:, :-1].contiguous(),
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
     return cycle_iter(dataloader) if cycle else iter(dataloader)

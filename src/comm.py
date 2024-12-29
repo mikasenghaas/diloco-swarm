@@ -129,11 +129,11 @@ class TrainingComm():
         dist.all_gather_object(all_outputs, outputs, group=self.world.curr_stage_group)
         self.logger.log_message(f"All outputs: {all_outputs}", level=Level.DEBUG, master=False)
 
-        def aggregate(outputs):
+        def aggregate(values: List[int], ignore: int = 0):
             s, c = 0, 0
-            for output in outputs:
-                if output is None: continue
-                s += output
+            for value in values:
+                if value == ignore or value is None: continue
+                s += value
                 c += 1
             return s, s / c if c > 0 else 0
 

@@ -131,6 +131,7 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     # Sync outputs
     local_outputs = Outputs(step=step, time=step_time, loss=local_batch_loss, tokens=local_batch_tokens, num_micro_batches=local_num_micro_batches)
     stage_outputs = training_comm.sync_outputs(local_outputs)
+    logger.log_message(f"Aggregated outputs={stage_outputs}", master=False, level=Level.DEBUG)
 
     return local_outputs, stage_outputs
 
@@ -302,6 +303,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, inner_model: nn.Module
     train_range = range(1, num_train_steps + 1)
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_master else None
     for step in train_range:
+        logger.log_message(f"Preparing batch for train step {step}", master=False, level=Level.DEBUG)
         batch = next(train_dataloader)
         local_outputs, stage_outputs = train_step(step, num_train_steps, inner_model, outer_model, batch, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, training_comm, device, config)
 

@@ -78,7 +78,7 @@ class Logger:
     def log_metrics(self, metrics: Dict[str, float], step: int | None = None, master: bool = True) -> None:
         metrics_str = f"{'Global' if master else 'Local'} metrics: " + str(metrics)
         self.log_message(metrics_str, master=master, level=Level.DEBUG)
-        if self.wandb_run: self.wandb_run.log(metrics, step=step)
+        if self.wandb_run and self.is_master: self.wandb_run.log(metrics, step=step)
 
     def log_samples(self, samples: List[str], step: int) -> None:
         for i, sample in enumerate(samples):
@@ -95,7 +95,7 @@ class Logger:
         logger = logging.getLogger(name)
         logger.setLevel(level)
         file_handler = logging.FileHandler(os.path.join(self.log_dir, f"{short_name}.log"))
-        file_handler.setFormatter(logging.Formatter(f'[%(levelname)s][{short_name}] %(message)s'))
+        file_handler.setFormatter(logging.Formatter(f'[%(asctime)s][%(levelname)s][[{short_name}] %(message)s'))
         logger.addHandler(file_handler)
         return logger
 
