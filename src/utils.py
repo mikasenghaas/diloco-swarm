@@ -91,8 +91,14 @@ def get_dataset(data_config: DataConfig, split: str) -> Dataset:
         dataset = dataset.select(range(int(len(dataset) * data_config.subset_size)))
     return dataset
 
-def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
+def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = None, return_tensors: str | None = "pt") -> Dict[str, Any]:
+    if max_length is None:
+        return tokenizer(sample, return_tensors=return_tensors)
+    return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length, return_tensors=return_tensors)
+
+def get_dataloader(dataset: Dataset, batch_size: int, tokenizer: AutoTokenizer, seq_length: int, shuffle: bool, cycle: bool = True) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        batch = [tokenize(item["text"], tokenizer, max_length=seq_length, return_tensors=None) for item in batch]
         batch_input_ids = torch.stack([torch.tensor(item['input_ids']) for item in batch])
         batch_attention_mask = torch.stack([torch.tensor(item['attention_mask']) for item in batch])
         return {
@@ -110,11 +116,6 @@ def get_micro_batches(batch: Dict[str, torch.Tensor], micro_batch_size: int, wor
         micro_dataloader = DataLoader(batch_data, batch_size=micro_batch_size, shuffle=False, sampler=micro_sampler)
         for local_micro_step, micro_batch in enumerate(micro_dataloader, start=1):
             yield rank, local_micro_step, micro_batch
-
-def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = None, return_tensors: str | None = "pt") -> Dict[str, Any]:
-    if max_length is None:
-        return tokenizer(sample, return_tensors=return_tensors)
-    return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length, return_tensors=return_tensors)
 
 def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
