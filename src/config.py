@@ -55,8 +55,7 @@ class TrainConfig(BaseConfig):
 class EvalConfig(BaseConfig):
     enable: bool = True
     every_n_steps: int = -1
-    max_epochs: int = 1
-    max_steps: int = -1
+    eval_size: float = 0.1
 
 class SampleConfig(BaseConfig):
     enable: bool = True

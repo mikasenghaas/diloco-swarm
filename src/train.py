@@ -378,19 +378,18 @@ def main(config: SwarmConfig):
     tokenizer = get_tokenizer()
     logger.log_message(f"Loaded tokenizer ({format_int(len(tokenizer), 0)} vocab size)", master=True, level=Level.INFO)
 
-    # Load dataset
+    # Load dataset (NB: Must be pre-tokenized)
     data = get_dataset(config.data, split="train")
     logger.log_message(f"Loaded dataset {config.data.path} with {format_int(len(data))} examples", master=True, level=Level.INFO)
     
     # Split dataset
-    train_val_dict = data.train_test_split(test_size=0.1, shuffle=True, seed=config.train.seed)
+    train_val_dict = data.train_test_split(test_size=config.eval.eval_size, shuffle=True, seed=config.train.seed)
     train_data, val_data = train_val_dict["train"], train_val_dict["test"]
     logger.log_message(f"Split dataset {config.data.path} into {format_int(len(train_data))} train, {format_int(len(val_data))} validation examples", master=True, level=Level.INFO)
 
     # Setup data loaders
-    seq_length = config.data.seq_length + 1
-    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, tokenizer=tokenizer, seq_length=seq_length, shuffle=False, cycle=True)
-    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, tokenizer=tokenizer, seq_length=seq_length, shuffle=False, cycle=True)
+    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, cycle=True)
+    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=False)
 
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)

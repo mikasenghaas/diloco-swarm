@@ -96,16 +96,17 @@ def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = Non
         return tokenizer(sample, return_tensors=return_tensors)
     return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length, return_tensors=return_tensors)
 
-def get_dataloader(dataset: Dataset, batch_size: int, tokenizer: AutoTokenizer, seq_length: int, shuffle: bool, cycle: bool = True) -> DataLoader:
+def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        batch = tokenizer([item["text"] for item in batch], max_length=seq_length, truncation=True, padding="max_length", return_tensors="pt")
+        batch_input_ids = torch.tensor([item["input_ids"] for item in batch], dtype=torch.long)
+        batch_attention_mask = torch.tensor([item["attention_mask"] for item in batch], dtype=torch.long)
         return {
-            "input_ids": batch["input_ids"][:, :-1].contiguous(),
-            "target_ids": batch["input_ids"][:, 1:].contiguous(),
-            "attention_mask": batch["attention_mask"][:, :-1].contiguous(),
+            "input_ids": batch_input_ids[:, :-1].contiguous(),
+            "target_ids": batch_input_ids[:, 1:].contiguous(),
+            "attention_mask": batch_attention_mask[:, :-1].contiguous(),
         }
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
-    return cycle_iter(dataloader) if cycle else iter(dataloader)
+    return cycle_iter(dataloader) if cycle else dataloader
 
 def get_micro_batches(batch: Dict[str, torch.Tensor], micro_batch_size: int, world: World) -> Generator:
     batch_data = BatchData(batch)
