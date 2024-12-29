@@ -331,7 +331,7 @@ def train_loop(num_train_steps: int, inner_model: nn.Module, outer_model: nn.Mod
 
     # Final evaluation
     if config.eval.enable:
-        outputs = eval_loop("eval", inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
+        outputs = eval_loop("test", inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=step, master=True)
 
     # Sample

@@ -78,7 +78,10 @@ class Logger:
     def log_metrics(self, metrics: Dict[str, float], step: int | None = None, master: bool = True) -> None:
         metrics_str = f"{'Global' if master else 'Local'} metrics: " + str(metrics)
         self.log_message(metrics_str, master=master, level=Level.DEBUG)
-        if self.wandb_run and self.is_master: self.wandb_run.log(metrics, step=step)
+        if master:
+            if self.wandb_run and self.is_master: self.wandb_run.log(metrics, step=step)
+        else:
+            if self.wandb_run: self.wandb_run.log(metrics, step=step)
 
     def log_samples(self, samples: List[str], step: int) -> None:
         for i, sample in enumerate(samples):
