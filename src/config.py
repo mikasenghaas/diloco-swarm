@@ -29,8 +29,6 @@ class OptimizerConfig(BaseConfig):
 class SchedulerConfig(BaseConfig):
     enable: bool = False
     num_warmup_steps: int = 100
-    num_cycles: float = 0.5
-    min_lr_factor: float = 0.1
     last_epoch: int = -1
 
 class AmpConfig(BaseConfig):

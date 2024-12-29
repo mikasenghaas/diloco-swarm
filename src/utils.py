@@ -66,16 +66,26 @@ def get_optimizer(model: nn.Module | AutoModelForCausalLM, optimizer_config: Opt
     else:
         raise ValueError(f"Invalid optimizer type: {optimizer_config.type}")
 
-def get_scheduler(optimizer: Optimizer, num_steps: int, scheduler_config: SchedulerConfig) -> LambdaLR:
-    def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
+# def get_scheduler(optimizer: Optimizer, num_steps: int, scheduler_config: SchedulerConfig) -> LambdaLR:
+#     def lr_lambda(step, warmup_steps, num_steps, num_cycles, min_lr_factor):
+#         if step < warmup_steps:
+#             return step / max(1, warmup_steps)
+#         progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
+#         cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
+#         return min_lr_factor + (1 - min_lr_factor) * cosine_decay
+#     if scheduler_config.enable:
+#         return LambdaLR(optimizer, lambda step: lr_lambda(step, scheduler_config.num_warmup_steps, num_steps, scheduler_config.num_cycles, scheduler_config.min_lr_factor), last_epoch=scheduler_config.last_epoch)
+#     return LambdaLR(optimizer, lambda _: 1)
+
+def get_scheduler(optimizer: Optimizer, scheduler_config: SchedulerConfig) -> LambdaLR:
+    def lr_lambda(step, warmup_steps):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, num_steps - warmup_steps)
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
-        return min_lr_factor + (1 - min_lr_factor) * cosine_decay
+        return 1.0
     if scheduler_config.enable:
-        return LambdaLR(optimizer, lambda step: lr_lambda(step, scheduler_config.num_warmup_steps, num_steps, scheduler_config.num_cycles, scheduler_config.min_lr_factor), last_epoch=scheduler_config.last_epoch)
+        return LambdaLR(optimizer, lambda step: lr_lambda(step, scheduler_config.num_warmup_steps), last_epoch=scheduler_config.last_epoch)
     return LambdaLR(optimizer, lambda _: 1)
+
 
 def get_dataset(data_config: DataConfig, split: str) -> Dataset:
     # Define a path for the processed dataset

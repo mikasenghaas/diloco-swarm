@@ -136,13 +136,12 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     return local_outputs, stage_outputs
 
 @torch.no_grad()
-def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
+def eval_loop(eval_type: Literal["eval", "test"], model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
-    eval_range = range(1, num_eval_steps + 1)
+    eval_range = range(1, len(eval_dataloader) + 1)
     eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_master else None
     eval_metrics.reset()
-    for step in eval_range:
-        batch = next(eval_dataloader)
+    for step, batch in enumerate(eval_dataloader, start=1):
         _, stage_outputs = eval_step(step, eval_type, model, batch, loss_fn, device, world, training_comm, config)
         
         if world.is_master:
@@ -273,7 +272,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
 
     return local_outputs, stage_outputs
 
-def train_loop(num_train_steps: int, num_eval_steps: int, inner_model: nn.Module, outer_model: nn.Module, tokenizer: AutoTokenizer, train_dataloader: DataLoader, eval_dataloader: DataLoader, loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, device: torch.device, config: SwarmConfig) -> Outputs:
+def train_loop(num_train_steps: int, inner_model: nn.Module, outer_model: nn.Module, tokenizer: AutoTokenizer, train_dataloader: DataLoader, eval_dataloader: DataLoader, loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, device: torch.device, config: SwarmConfig) -> Outputs:
     # Initialize metrics
     local_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/local")
     global_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/global")
@@ -296,7 +295,7 @@ def train_loop(num_train_steps: int, num_eval_steps: int, inner_model: nn.Module
 
     # Validate before training
     if config.eval.enable:
-        outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
+        outputs = eval_loop("eval", inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=0, master=True)
 
     logger.log_message(f"Starting training", master=False, level=Level.DEBUG)
@@ -327,12 +326,12 @@ def train_loop(num_train_steps: int, num_eval_steps: int, inner_model: nn.Module
 
         # Validate
         if config.eval.enable and config.eval.every_n_steps > 0 and step % config.eval.every_n_steps == 0:
-            outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
+            outputs = eval_loop("eval", inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
             logger.log_metrics(outputs, step=step, master=True)
 
     # Final evaluation
     if config.eval.enable:
-        outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
+        outputs = eval_loop("eval", inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=step, master=True)
 
     # Sample
@@ -393,11 +392,10 @@ def main(config: SwarmConfig):
 
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
-    num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.train.micro_batch_size)
 
     # Get training, evaluation and testing setup
     train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
-    eval_setup = get_train_setup(num_eval_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
+    eval_setup = get_train_setup(len(eval_dataloader), config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
     logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]), master=True, level=Level.INFO)
     logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]), master=True, level=Level.INFO)
 
@@ -406,12 +404,12 @@ def main(config: SwarmConfig):
     outer_optimizer = None
     if config.train.outer_optimizer.type != "None":
         outer_optimizer = get_optimizer(outer_model, config.train.outer_optimizer)
-    scheduler = get_scheduler(inner_optimizer, num_train_steps, config.train.scheduler)
+    scheduler = get_scheduler(inner_optimizer, config.train.scheduler)
     loss_fn = nn.CrossEntropyLoss()
     logger.log_message("Initialized optimizer, scheduler and loss function", master=True, level=Level.INFO)
 
     # Training loop
-    train_loop(num_train_steps, num_eval_steps, inner_model, outer_model, tokenizer, train_dataloader, eval_dataloader, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, device, config)
+    train_loop(num_train_steps, inner_model, outer_model, tokenizer, train_dataloader, eval_dataloader, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, device, config)
 
     # Cleanup
     dist.barrier()
