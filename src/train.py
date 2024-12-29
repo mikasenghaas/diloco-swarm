@@ -262,7 +262,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
 
     # Timing
     step_time = time.time() - start
-    micro_step_time = step_time / num_micro_steps
+    micro_step_time = step_time / num_micro_steps_per_device
 
     # Compute and sync outputs
     local_outputs, stage_outputs = Outputs(step=step, lr=lr, loss=local_batch_loss, tokens=local_batch_tokens, norm=norm, time=step_time, micro_step_time=micro_step_time, num_micro_batches=local_num_micro_batches), None

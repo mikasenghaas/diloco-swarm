@@ -120,13 +120,13 @@ def get_micro_batches(batch: Dict[str, torch.Tensor], micro_batch_size: int, wor
 def get_train_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()
     step = curr_metrics.get(f"{metrics.name}/step/current")
-    micro_time = curr_metrics.get(f"{metrics.name}/micro_time/current")
+    time = curr_metrics.get(f"{metrics.name}/time/current")
     loss = curr_metrics.get(f"{metrics.name}/loss/current")
     norm = curr_metrics.get(f"{metrics.name}/norm/current")
     norm = 0 if norm is None else norm
     perplexity = curr_metrics.get(f"{metrics.name}/perplexity/current")
     throughput = curr_metrics.get(f"{metrics.name}/throughput/current")
-    return f"{prefix} Step: {step} - Time: {micro_time*1000:.1f}ms - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
+    return f"{prefix} Step: {step} - Time: {time:.1f}s - Loss: {loss:.4f} - Norm: {norm:.4f} - Perplexity: {perplexity:.1f} - Throughput: {throughput:.1f}"
 
 def get_eval_pbar_description(metrics: Metrics, prefix: str):
     curr_metrics = metrics.compute()

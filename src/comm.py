@@ -127,16 +127,25 @@ class TrainingComm():
         if len(peers) == 1: return outputs
         all_outputs : List[Outputs] = [None] * len(peers)
         dist.all_gather_object(all_outputs, outputs, group=self.world.curr_stage_group)
+        self.logger.log_message(f"All outputs: {all_outputs}", level=Level.DEBUG, master=False)
+
+        def aggregate(outputs):
+            s, c = 0, 0
+            for output in outputs:
+                if output is None: continue
+                s += output
+                c += 1
+            return s, s / c if c > 0 else 0
 
         return Outputs(
             step=outputs.step, # Same for all
-            tokens=sum([output.tokens for output in all_outputs]), # Sum across all
-            num_micro_batches=sum([output.num_micro_batches for output in all_outputs]), # Sum across all
-            time=sum([output.time for output in all_outputs]) / len(peers), # Average across all
-            loss=sum([output.loss for output in all_outputs]) / len(peers), # Average across all
-            lr=sum([output.lr for output in all_outputs]) / len(peers) if outputs.lr is not None else None, # Average across all, if exists
-            norm=sum([output.norm for output in all_outputs]) / len(peers) if outputs.norm is not None else None, # Average across all, if exists
-            micro_step_time=sum([output.micro_step_time for output in all_outputs]) / len(peers) if outputs.micro_step_time is not None else None # Average across all, if exists
+            tokens=aggregate([output.tokens for output in all_outputs])[0], # Sum across all
+            num_micro_batches=aggregate([output.num_micro_batches for output in all_outputs])[0], # Sum across all
+            time=aggregate([output.time for output in all_outputs])[1], # Average across all
+            loss=aggregate([output.loss for output in all_outputs])[1], # Average across all
+            lr=aggregate([output.lr for output in all_outputs])[1], # Average across all, if exists
+            norm=aggregate([output.norm for output in all_outputs])[1], # Average across all, if exists
+            micro_step_time=aggregate([output.micro_step_time for output in all_outputs])[1] # Average across all, if exists
         )
 
 class InferenceComm():
