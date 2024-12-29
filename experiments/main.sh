@@ -1,9 +1,10 @@
 #!/bin/bash
 
 set -e
+TAGS="Main"
 
-TAGS="Test,Main"
-CMD="torchrun --nproc_per_node 1 src/train.py \
+# Baseline (Single GPU)
+torchrun --nproc_per_node 1 src/train.py \
     --swarm.num_stages 1 \
     --swarm.sync_every_n_steps 1 \
     --model @configs/model/gpt2-small.toml \
@@ -20,7 +21,5 @@ CMD="torchrun --nproc_per_node 1 src/train.py \
     --eval.every_n_steps 10 \
     --sample.enable true \
     --sample.every_n_steps 50 \
-    --logging.wandb.enable false \
-    --logging.wandb.tags '$TAGS,Single-GPU'"
-
-echo $CMD; eval $CMD;
+    --logging.wandb.enable true \
+    --logging.wandb.tags "$TAGS,Single-GPU"

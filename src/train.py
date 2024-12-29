@@ -80,7 +80,6 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     model.to(device); model.eval()
 
     # Setup step
-    num_micro_steps = 1 # Assuming batch_size == micro_batch_size
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     world.setup_step(step, num_micro_steps=1, type=eval_type) # Assume batch size = micro batch size
     micro_batches = {}
@@ -117,7 +116,7 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
             # Compute loss
             loss = loss_fn(logits_filtered, targets_filtered)
-            loss = loss / num_micro_steps
+            logger.log_message(f"Computed local loss: {loss.item()}", master=False, level=Level.DEBUG)
 
             # Update statistics
             local_batch_loss += loss.detach().item()
@@ -139,7 +138,7 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 def eval_loop(eval_type: Literal["eval", "test"], num_eval_steps: int, model: nn.Module, loss_fn: nn.Module, eval_dataloader: DataLoader, eval_metrics: Metrics, world: World, training_comm: TrainingComm, device: torch.device, config: SwarmConfig) -> Outputs:
     """Evaluation loop on eval data loader"""
     eval_range = range(1, num_eval_steps + 1)
-    eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_leader and world.is_last_stage else None
+    eval_bar = tqdm(eval_range, position=1, leave=False) if world.is_master else None
     eval_metrics.reset()
     for step in eval_range:
         batch = next(eval_dataloader)
@@ -207,9 +206,9 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
                 logits_filtered, targets_filtered = filter_logits_targets(output_tensor, target_ids, mask)
                 
                 # Compute loss
-                logger.log_message(f"Computing local loss", master=False, level=Level.DEBUG)
                 loss = loss_fn(logits_filtered, targets_filtered)
                 loss = loss / num_micro_steps_per_device
+                logger.log_message(f"Computed local loss: {loss.item()}", master=False, level=Level.DEBUG)
                 
                 # Update statistics
                 local_batch_loss += loss.detach().item()
