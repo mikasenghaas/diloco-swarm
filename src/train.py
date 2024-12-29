@@ -273,12 +273,11 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
 
     return local_outputs, stage_outputs
 
-def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, inner_model: nn.Module, outer_model: nn.Module, tokenizer: AutoTokenizer, train_dataloader: DataLoader, eval_dataloader: DataLoader, test_dataloader: DataLoader, loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, device: torch.device, config: SwarmConfig) -> Outputs:
+def train_loop(num_train_steps: int, num_eval_steps: int, inner_model: nn.Module, outer_model: nn.Module, tokenizer: AutoTokenizer, train_dataloader: DataLoader, eval_dataloader: DataLoader, loss_fn: nn.Module, inner_optimizer: Optimizer, outer_optimizer: Optimizer, scheduler: LambdaLR, world: World, device: torch.device, config: SwarmConfig) -> Outputs:
     # Initialize metrics
     local_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/local")
     global_train_metrics = Metrics([Step(), Time(), MicroTime(), Tokens(), NumMicroBatches(), Norm(), Loss(), Perplexity(), Throughput(), LearningRate()], name="train/global")
     eval_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="eval")
-    test_metrics = Metrics([Throughput(), Loss(), Perplexity()], name="test")
 
     # Initialize training communication
     training_shape = (config.train.micro_batch_size, config.data.seq_length, inner_model.config.n_embd)
@@ -330,9 +329,9 @@ def train_loop(num_train_steps: int, num_eval_steps: int, num_test_steps: int, i
             outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
             logger.log_metrics(outputs, step=step, master=True)
 
-    # Test
+    # Final evaluation
     if config.eval.enable:
-        outputs = eval_loop("test", num_test_steps, inner_model, loss_fn, test_dataloader, test_metrics, world, training_comm, device, config)
+        outputs = eval_loop("eval", num_eval_steps, inner_model, loss_fn, eval_dataloader, eval_metrics, world, training_comm, device, config)
         logger.log_metrics(outputs, step=step, master=True)
 
     # Sample
@@ -379,10 +378,13 @@ def main(config: SwarmConfig):
     logger.log_message(f"Loaded tokenizer ({format_int(len(tokenizer), 0)} vocab size)", master=True, level=Level.INFO)
 
     # Load dataset
-    train_data = get_dataset(config.data, split="train")
-    val_data = get_dataset(config.data, split="validation")
-    test_data = get_dataset(config.data, split="test")
-    logger.log_message(f"Loaded dataset {config.data.path} with {format_int(len(train_data))} train, {format_int(len(val_data))} validation, {format_int(len(test_data))} test examples", master=True, level=Level.INFO)
+    data = get_dataset(config.data, split="train")
+    logger.log_message(f"Loaded dataset {config.data.path} with {format_int(len(data))} examples", master=True, level=Level.INFO)
+    
+    # Split dataset
+    train_val_dict = data.train_test_split(test_size=0.1, shuffle=True, seed=config.train.seed)
+    train_data, val_data = train_val_dict["train"], train_val_dict["test"]
+    logger.log_message(f"Split dataset {config.data.path} into {format_int(len(train_data))} train, {format_int(len(val_data))} validation examples", master=True, level=Level.INFO)
 
     # Prepare dataset
     seq_length = config.data.seq_length + 1
@@ -399,15 +401,12 @@ def main(config: SwarmConfig):
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
     num_eval_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(val_data), config.train.micro_batch_size)
-    num_test_steps = get_num_steps(config.eval.max_steps, config.eval.max_epochs, len(test_data), config.train.micro_batch_size)
 
     # Get training, evaluation and testing setup
     train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
     eval_setup = get_train_setup(num_eval_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
-    test_setup = get_train_setup(num_test_steps, config.train.micro_batch_size, config.data.seq_length, -1, len(test_data))
     logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]), master=True, level=Level.INFO)
     logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]), master=True, level=Level.INFO)
-    logger.log_message("Test setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in test_setup.items()]), master=True, level=Level.INFO)
 
     # Get optimizer and scheduler
     inner_optimizer = get_optimizer(inner_model, config.train.inner_optimizer)
@@ -419,7 +418,7 @@ def main(config: SwarmConfig):
     logger.log_message("Initialized optimizer, scheduler and loss function", master=True, level=Level.INFO)
 
     # Training loop
-    train_loop(num_train_steps, num_eval_steps, num_test_steps, inner_model, outer_model, tokenizer, train_dataloader, eval_dataloader, test_dataloader, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, device, config)
+    train_loop(num_train_steps, num_eval_steps, inner_model, outer_model, tokenizer, train_dataloader, eval_dataloader, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, device, config)
 
     # Cleanup
     dist.barrier()
