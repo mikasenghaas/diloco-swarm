@@ -162,8 +162,11 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
     num_micro_steps = config.train.batch_size // config.train.micro_batch_size
     num_micro_steps_per_device = num_micro_steps // (len(world.stage2ranks[world.num_stages-1])) # TODO: How to scale w/ heterogenity?
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
+    logger.log_message(f"Setup train step {step} in world", master=False, level=Level.DEBUG)
     world.setup_step(step, num_micro_steps=num_micro_steps)
+
     micro_batches = {}
+    logger.log_message(f"Preparing micro batch distribution", master=False, level=Level.DEBUG)
     for rank, local_micro_step, micro_batch in get_micro_batches(batch, config.train.micro_batch_size, world):
         micro_batches[(rank, local_micro_step)] = micro_batch
         if world.is_first_stage and rank == world.rank:
@@ -172,7 +175,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
     # Start training step
     local_batch_loss, local_batch_tokens, local_num_micro_batches = 0.0, 0, 0
     input_output_tensors = {}
-    logger.log_message(f"Train step {step} ({num_micro_steps} micro steps)", master=False, level=Level.DEBUG)
+    logger.log_message(f"Starting train step {step}", master=False, level=Level.DEBUG)
     while True:
         if world.is_step_done(step): break
         if time.time() - start > config.train.step_timeout: logger.log_message(f"Train step {step} timed out", master=False, level=Level.WARNING); break
@@ -301,9 +304,10 @@ def train_loop(num_train_steps: int, inner_model: nn.Module, outer_model: nn.Mod
     logger.log_message(f"Starting training", master=False, level=Level.DEBUG)
     train_range = range(1, num_train_steps + 1)
     train_bar = tqdm(train_range, position=0, leave=False) if world.is_master else None
+    train_iter = iter(train_dataloader)
     for step in train_range:
         logger.log_message(f"Preparing batch for train step {step}", master=False, level=Level.DEBUG)
-        batch = next(train_dataloader)
+        batch = next(train_iter)
         local_outputs, stage_outputs = train_step(step, num_train_steps, inner_model, outer_model, batch, loss_fn, inner_optimizer, outer_optimizer, scheduler, world, training_comm, device, config)
 
         # Update local metrics
@@ -387,8 +391,8 @@ def main(config: SwarmConfig):
     logger.log_message(f"Split dataset {config.data.path} into {format_int(len(train_data))} train, {format_int(len(val_data))} validation examples", master=True, level=Level.INFO)
 
     # Setup data loaders
-    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, cycle=True)
-    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=False, cycle=False)
+    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False)
+    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=False)
 
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
@@ -416,4 +420,5 @@ def main(config: SwarmConfig):
     dist.destroy_process_group()
 
 if __name__ == "__main__":
+    import os; os.environ["TOKENIZERS_PARALLELISM"] = "false"
     main(SwarmConfig(**parse_argv()))

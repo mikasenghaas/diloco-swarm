@@ -1,6 +1,5 @@
 import os
 import copy
-import math
 import contextlib
 from typing import Optional, List, Dict, Tuple, Any, Generator
 
@@ -8,7 +7,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from dotenv import load_dotenv
-from itertools import cycle as cycle_iter
 from torch.utils.data import DataLoader
 from datasets import Dataset, load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -106,17 +104,18 @@ def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = Non
         return tokenizer(sample, return_tensors=return_tensors)
     return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length, return_tensors=return_tensors)
 
-def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, cycle: bool = True) -> DataLoader:
+def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
     def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        batch_input_ids = torch.tensor([item["input_ids"] for item in batch], dtype=torch.long)
-        batch_attention_mask = torch.tensor([item["attention_mask"] for item in batch], dtype=torch.long)
+        batch_input_ids = torch.stack([torch.tensor(item["input_ids"], dtype=torch.long) for item in batch], dim=0)
+        batch_attention_mask = torch.stack([torch.tensor(item["attention_mask"], dtype=torch.long) for item in batch], dim=0)
+
         return {
             "input_ids": batch_input_ids[:, :-1].contiguous(),
             "target_ids": batch_input_ids[:, 1:].contiguous(),
             "attention_mask": batch_attention_mask[:, :-1].contiguous(),
         }
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch)
-    return cycle_iter(dataloader) if cycle else dataloader
+    
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch, pin_memory=True, num_workers=4)
 
 def get_micro_batches(batch: Dict[str, torch.Tensor], micro_batch_size: int, world: World) -> Generator:
     batch_data = BatchData(batch)
