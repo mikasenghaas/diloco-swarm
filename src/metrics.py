@@ -134,7 +134,7 @@ class Perplexity(Metric):
         self.perplexities : List[float] = []
 
     def update(self, outputs: Outputs):
-        self.perplexities.append(math.exp(outputs.loss))
+        self.perplexities.append(math.exp(outputs.loss) if outputs.loss > 0 else 0)
 
     def compute(self) -> Dict[str, float]:
         return {"current": self.perplexities[-1] if self.perplexities else 0, "average": sum(self.perplexities) / len(self.perplexities) if self.perplexities else 0}

@@ -79,10 +79,14 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     start = time.time()
     model.to(device); model.eval()
 
-    # Setup step
+    num_micro_steps = config.train.batch_size // config.train.micro_batch_size
+    num_micro_steps_per_device = num_micro_steps // (len(world.stage2ranks[world.num_stages-1])) # TODO: How to scale w/ heterogenity?
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
-    world.setup_step(step, num_micro_steps=1, type=eval_type) # Assume batch size = micro batch size
+    logger.log_message(f"Setup eval step {step} in world", master=False, level=Level.DEBUG)
+    world.setup_step(step, num_micro_steps=num_micro_steps, type=eval_type)
+
     micro_batches = {}
+    logger.log_message(f"Preparing micro batch distribution", master=False, level=Level.DEBUG)
     for rank, local_micro_step, micro_batch in get_micro_batches(batch, config.train.micro_batch_size, world):
         micro_batches[(rank, local_micro_step)] = micro_batch
         if world.is_first_stage and rank == world.rank:
@@ -116,6 +120,7 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
 
             # Compute loss
             loss = loss_fn(logits_filtered, targets_filtered)
+            loss = loss / num_micro_steps_per_device
             logger.log_message(f"Computed local loss: {loss.item()}", master=False, level=Level.DEBUG)
 
             # Update statistics
@@ -392,14 +397,14 @@ def main(config: SwarmConfig):
 
     # Setup data loaders
     train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False)
-    eval_dataloader = get_dataloader(val_data, batch_size=config.train.micro_batch_size, shuffle=False)
+    eval_dataloader = get_dataloader(val_data, batch_size=config.train.batch_size, shuffle=False)
 
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)
 
     # Get training, evaluation and testing setup
     train_setup = get_train_setup(num_train_steps, config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(train_data))
-    eval_setup = get_train_setup(len(eval_dataloader), config.train.micro_batch_size, config.data.seq_length, -1, len(val_data))
+    eval_setup = get_train_setup(len(eval_dataloader), config.train.batch_size, config.data.seq_length, config.train.micro_batch_size, len(val_data))
     logger.log_message("Train setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in train_setup.items()]), master=True, level=Level.INFO)
     logger.log_message("Eval setup:\t" + "\t".join([f"{k.replace('_', ' ').title()}: {format_int(v, 1) if isinstance(v, int) else format_float(v)}" for k, v in eval_setup.items()]), master=True, level=Level.INFO)
 
