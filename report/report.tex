@@ -11,6 +11,7 @@
 \usepackage{amsmath}
 \usepackage{xcolor}
 \usepackage{subcaption}
+\usepackage{listings}
 
 % Aliases
 \newcommand{\github}{\href{https://github.com/mikasenghaas/swarm}{GitHub}}
@@ -20,6 +21,25 @@
 % Colours
 \definecolor{bblue}{HTML}{5884E2}
 \definecolor{oorange}{HTML}{F19E38}
+
+% Code
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.95}
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
 
 % Running Title
 \icmltitlerunning{DiLoCo-SWARM}
@@ -133,7 +153,7 @@ nodes to periodically communicate intermediate results. We will describe two of
 the most widely used forms of parallelization, relevant in the context of
 DiLoCo-SWARM.
 
-\begin{figure}[h]
+\begin{figure}[ht]
     \centering
     \begin{subfigure}[b]{0.22\textwidth}
         \centering
@@ -269,7 +289,7 @@ after some timeout, are re-routed and the suspected node is temporarily excluded
 from training. Further, nodes periodically switch from under- to overutilised
 stages to distribute workload.
 
-\begin{figure}[h]
+\begin{figure}[ht]
   \centering
   \includegraphics[width=0.45\textwidth]{figures/swarm.png}
   \caption{\textbf{SWARM Communication} We show high-level communication
@@ -295,50 +315,49 @@ DiLoCo-SWARM.
 
 \section{Implementation}
 
-A key contribution of this work is the release of a minimal distributed training
-script. Depending of its parameterization, it runs a multi-node training job
-using data parallelism, tensor parallelism, or a SWARM-style combination of the
-two. By optinally specifying an outer optimizer, the script replaces regular
-step-wise gradient synchronization with the DiLoCo-style inner-outer
-optimization scheme.
+% Question: Should I go in detail to explain the implementation?
 
-% Advantages
-The implementation is designed for simplicity and readability. Instead of the
-multiple thousand lines of code in the original implementation, it uses only a
-few hundreds with the only dependency being PyTorch. This makes it easy for
-anybody with some experience in distributed training to grasp the core ideas and
-interaction being various traditional parallelization techniques, and 
-state-of-the-art methods, like DiLoCo and SWARM. For small-scale testing, it can
-emulate training via threads, allowing for debugging and testing without dozens
-of GPUs. Because it natively integrates various parallelization techniques, and
-interfaces with HuggingFace for models and datasets, it is the ideal starting
-point for quickly verifying research ideas and conducting, as showcased in
-DiLoCo-SWARM.
+% Introduction
+A key contribution of this work is the release of the full experiment codebase
+(\github{}) and a distilled single-file training script (\gist{}) which
+implements all of the above mentioned distributed training methods in one place,
+i.e. data, pipeline, and SWARM parallelism, with optional DiLoCo-style gradient
+synchronization. Example invocations are shown in the Appendix.
 
-% Limitations (Not feature-complete and less efficienty)
-However, as of this point, the re-implementation is not feature-complete. Due to
-limitations to PyTorch distributed, it does not yet support dynamic world sizes,
-over-the-internet connections, and the SWARM's fault tolerance mechanism such as
-re-wiring requests. Therefore, the script can only run distributed application
-on single node. While this seems to be miss the point of SWARM parallelism, it
-still allows for interesting research regarding the core logic of the system. It
-should also be noted that the training script does not match the efficiency
-reported in the original paper which uses custom distributed communication and
-storage primitives, advanced scheduling, and, whenever possible, overlaps
-computation asynchronously, resulting in larger hardware utilization.
+% Advantages (Minimal, PyTorch-only, various algos, HF support)
+The implementation is designed with simplicity and readability in mind. It only
+depends on PyTorch, specifically the \texttt{torch.distributed} package, for
+training and communication. Further, instead of multiple thousand lines of code 
+of the original SWARM implementation, it uses only a few hundred. Put together,
+this makes it easy for anybody to understand various traditional parallelization
+techniques, and how they interact with decentralized variants, like DiLoCo and
+SWARM. To enable quick testing and debugging, it can emulate nodes via threads.
+Finally, it integrates with HuggingFace for models and datasets, allowing
+diverse testing setups. In summary, we hope that the single-file training script
+will be an excellent educational resource, and the full experiment codebase a
+starting point for rapidly verifying and iterating on research ideas, as
+showcased with DiLoCo-SWARM.
 
-% TODO: Show in the Appendix which features are supported and which are not
+% Limitations (Not feature-complete and less efficient)
+The simplicity comes at the cost of efficiency and feature-incompleteness. In
+particular, a subset of SWARM features, most notably those enabling
+fault-tolerance, are not yet supported. Some require features beyond what is
+supported in PyTorch today. A full list of not-yet supported features is listed
+in the Appendix. An important consequence of this is that the script currently
+only supports runs on a single node with multiple workers, making the system
+unusable in production-settings. Regardless, research is still possible, as, for
+example, network latency can be artifically introduced to emulate a truly
+decentral application. Finally, the training script does not use an advanced
+scheduling technique for pipelining, and so time-to-accuracy comparison is not
+meaningful.
 
 % NanoGPT
-The implementation should therefore be seen as a supplemental resource, which
-puts emphasize on understandability, and hackability. Our hope is that it might
-have a similar effect of NanoGPT, which now serves as an easy-to-hack and verify
-testing ground for novel research within the open-source community.
-
-% Implementation details
-For more details on the implementation, design decision and some hacks to
-circumvent limitations of PyTorch's distributed package, find more details in
-the \href{https://github.com/mikasenghaas/swarm}{GitHub} repository.
+The implementation should therefore be seen as a supplemental resource, focusing
+on simplicity, and hackability. Our hope is that it might trigger a similar
+effect as NanoGPT~\cite{nanogpt2024}, a minimal re-implementation of GPT-2,
+which today serves as the default tool within the open-source community to
+benchmark research in deep learning components, such as architectures,
+hyperparameters, or optimizers~\cite{moddednanogpt2024}.
 
 \section{Experiments}
 
@@ -559,16 +578,72 @@ by Prime Intellect.
 
 \section{Appendix}
 
+% TODO: Add invocations
+% TODO: Supported and non-supported features in implementation
+
 % Hardware
-\textbf{Hardware.} All experiments were conducted on a single node with eight
-co-located H100 GPUs on the \href{https://app.primeintellect.com/}{Prime
-Intellect Compute} platform.
+\subsection{Hardware}
+
+All experiments were conducted on a single node with eight co-located H100 GPUs
+on the \href{https://app.primeintellect.com/}{Prime Intellect Compute} platform.
+
+\subsection{Training Script Invocations}
+
+Below we show example invocations for different distributed training algorithms.
+All examples use a GPT-2 small model and the FineWeb-Edu dataset as an example.
+For more details see the README on \github.
+
+\begin{lstlisting}[language=bash]
+# Single GPU training
+torchrun --nproc_per_node 1 src/train.py --swarm.num_stages 1 \
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/fineweb-edu-10bt.toml
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+# Pipeline parallel training with 2 GPUs
+torchrun --nproc_per_node 2 src/train.py --swarm.num_stages 2 \
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/fineweb-edu-10bt.toml
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+# Data parallel training with 2 GPUs
+torchrun --nproc_per_node 2 src/train.py --swarm.num_stages 2 \
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/fineweb-edu-10bt.toml
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+# DiLoCo training with 2 GPUs
+torchrun --nproc_per_node 2 src/train.py --swarm.num_stages 2 \
+    --train.outer_optimizer @configs/optimizer/nesterov.toml
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/fineweb-edu-10bt.toml
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+# SWARM training with 4 GPUs
+torchrun --nproc_per_node 4 src/train.py --swarm.num_stages 2 \
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/fineweb-edu-10bt.toml
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+# DiLoCo-SWARM training with 4 GPUs
+torchrun --nproc_per_node 4 src/train.py --swarm.num_stages 2 \
+    --train.outer_optimizer configs/optimizer/nesterov.toml
+    --model @configs/model/gpt2-small.toml \
+    --data @configs/data/fineweb-edu-10bt.toml
+\end{lstlisting}
 
 % Hyperparameters
-\textbf{Hyperparameters.} Table~\ref{tab:hyperparameters} shows the
-hyperparameters used in the experiments. The outer optimizer parameters is only
-used for DiLoCo-style training, else the outer optimization simply synchronizes
-the inner model gradients before performing a regular update.
+\subsection{Hyperparameters}
+
+Table~\ref{tab:hyperparameters} shows the hyperparameters used throughout the
+experiments. The outer optimizer parameters is only used for DiLoCo-style
+training, else the gradients are averaged before performing a regular optimizer
+step by default.
 
 \begin{table}[ht]
 \centering
