@@ -5,6 +5,7 @@
 /data
 /checkpoints
 /huggingface
+/writing
 .gitconfig
 .sshconfig
 
