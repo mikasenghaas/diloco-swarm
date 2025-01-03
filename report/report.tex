@@ -49,18 +49,29 @@
 
 % Title
 \twocolumn[
-  \icmltitle{DiLoCo-SWARM: Early Steps Towards Scalable Decentral Learning}
+  \icmltitle{DiLoCo-SWARM}
   \begin{icmlauthorlist}
-    \icmlauthor{Mika Senghaas}{epfl}
+    \icmlauthor{Mika Senghaas}{author}
+    \icmlauthor{Martijn De Vos}{supervisor}
+    \icmlauthor{Akash Dhasad}{supervisor}
+    \icmlauthor{Rishi Sharma}{supervisor}
   \end{icmlauthorlist}
-  \icmlaffiliation{epfl}{EPFL}
+  \icmlaffiliation{author}{Author}
+  \icmlaffiliation{supervisor}{Supervisor}
   \icmlkeywords{Distributed Training, Decentralized AI, SWARM, DiLoCo}
   \vskip 0.3in
 ]
 
 % Abstract
 \begin{abstract}
-  ...
+  We investigate DiLoCo-SWARM, a decentralized training approach that combines
+  the pipeline and data parallelism of SWARM with DiLoCo's reduced-frequency
+  gradient synchronization. Our experiments on language modeling tasks show that
+  DiLoCo-SWARM matches or surpasses fully synchronized SWARM baselines despite
+  synchronizing gradients up to 50 times less frequently. We publicly release a
+  minimal PyTorch implementation of various traditional and state-of-the-art
+  distributed training methods as an educational resource, as well as a starting
+  point for further research in decentralized AI.
 \end{abstract}
 
 \section{Introduction}
