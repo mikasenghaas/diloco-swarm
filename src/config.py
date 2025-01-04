@@ -73,7 +73,7 @@ class FileLoggingConfig(BaseConfig):
 class WandbLoggingConfig(BaseConfig):
     enable: bool = False
     entity: str | None = "mikasenghaas"
-    project: str | None = "swarm"
+    project: str | None = "diloco-swarm"
     tags: List[str] = []
     group: str | None = None
     cache_dir: str | None = None

@@ -7,7 +7,7 @@ set -e
 export $(grep -v '^#' .env | xargs)
 
 # Clone repository with strict host key checking disabled
-GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' git clone git@github.com:mikasenghaas/swarm.git $PERSISTENT_DIR/swarm
+GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' git clone git@github.com:mikasenghaas/diloco-swarm.git $PERSISTENT_DIR/diloco-swarm
 
 # Miniconda setup
 wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O $PERSISTENT_DIR/install_miniconda.sh
@@ -22,7 +22,7 @@ conda activate swarm
 
 # Dependencies
 PIP_FLAGS="--root-user-action ignore --upgrade pip"
-pip install $PIP_FLAGS -r $PERSISTENT_DIR/swarm/requirements.txt
+pip install $PIP_FLAGS -r $PERSISTENT_DIR/diloco-swarm/requirements.txt
 
 # W&B and HF login from .env
 export $(grep -v '^#' .env | xargs)
