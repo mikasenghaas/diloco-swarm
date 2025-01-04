@@ -1,15 +1,15 @@
 #!/bin/bash
 
-set -e
+# This script is used for quick testing of experiment setup, e.g. tune (micro-) batch size, etc.
 
-TAGS="Test,Main"
+TAGS="Test"
 CMD="torchrun --nproc_per_node 8 src/train.py \
     --swarm.num_stages 2 \
-    --swarm.sync_every_n_steps 1 \
-    --model @configs/model/gpt2-medium.toml \
+    --swarm.sync_every_n_steps 50 \
+    --model @configs/model/gpt2-small.toml \
     --data @configs/data/fineweb-edu-10bt.toml \
     --train.inner_optimizer @configs/optimizer/adamw.toml \
-    --train.outer_optimizer @configs/optimizer/none.toml \
+    --train.outer_optimizer @configs/optimizer/nesterov.toml \
     --train.inner_optimizer.lr 4e-4 \
     --train.outer_optimizer.lr 0.7 \
     --train.scheduler.enable true \
@@ -19,11 +19,12 @@ CMD="torchrun --nproc_per_node 8 src/train.py \
     --data.seq_length 1024 \
     --train.micro_batch_size 8 \
     --train.max_micro_batches 16 \
-    --eval.enable false \
+    --eval.enable true \
     --eval.every_n_steps 50 \
     --eval.eval_size 0.001 \
-    --sample.enable false \
+    --sample.enable true \
     --sample.every_n_steps 100 \
-    --logging.wandb.enable false"
+    --logging.wandb.enable false \
+    --logging.wandb.tags $TAGS"
 
 echo $CMD; eval $CMD;
