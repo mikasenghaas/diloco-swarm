@@ -67,10 +67,10 @@ To verify that the setup was successful, you can try running any of the experime
 cd diloco-swarm && pip install -r requirements.dev.txt
 ```
 
-Once completed, you can run a simple test to check whether you can train, evaluate, and sample from a model locally.
+Once completed, you can run a simple test that checks whether the setup was successful.
 
 ```bash
-pytest tests/test_train.py
+pytest tests/test_setup.py
 ```
 
 
