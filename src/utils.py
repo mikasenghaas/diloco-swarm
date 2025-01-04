@@ -104,18 +104,18 @@ def tokenize(sample: str, tokenizer: AutoTokenizer, max_length: int | None = Non
         return tokenizer(sample, return_tensors=return_tensors)
     return tokenizer(sample, truncation=True, padding="max_length", max_length=max_length, return_tensors=return_tensors)
 
-def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
-    def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        batch_input_ids = torch.stack([torch.tensor(item["input_ids"], dtype=torch.long) for item in batch], dim=0)
-        batch_attention_mask = torch.stack([torch.tensor(item["attention_mask"], dtype=torch.long) for item in batch], dim=0)
+def collate_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    batch_input_ids = torch.stack([torch.tensor(item["input_ids"], dtype=torch.long) for item in batch], dim=0)
+    batch_attention_mask = torch.stack([torch.tensor(item["attention_mask"], dtype=torch.long) for item in batch], dim=0)
 
-        return {
-            "input_ids": batch_input_ids[:, :-1].contiguous(),
-            "target_ids": batch_input_ids[:, 1:].contiguous(),
-            "attention_mask": batch_attention_mask[:, :-1].contiguous(),
-        }
-    
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch, pin_memory=True, num_workers=4, drop_last=True)
+    return {
+        "input_ids": batch_input_ids[:, :-1].contiguous(),
+        "target_ids": batch_input_ids[:, 1:].contiguous(),
+        "attention_mask": batch_attention_mask[:, :-1].contiguous(),
+    }
+
+def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool, pin_memory: bool, num_workers: int) -> DataLoader:
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_batch, pin_memory=pin_memory, num_workers=num_workers, drop_last=True)
 
 def get_micro_batches(batch: Dict[str, torch.Tensor], micro_batch_size: int, world: World) -> Generator:
     batch_data = BatchData(batch)

@@ -80,7 +80,7 @@ def eval_step(step: int, eval_type: Literal["eval", "test"], model: nn.Module, b
     model.to(device); model.eval()
 
     num_micro_steps = config.train.batch_size // config.train.micro_batch_size
-    num_micro_steps_per_device = num_micro_steps // (len(world.stage2ranks[world.num_stages-1])) # TODO: How to scale w/ heterogenity?
+    num_micro_steps_per_device = max(1, num_micro_steps // (len(world.stage2ranks[world.num_stages-1]))) # TODO: How to scale w/ heterogenity?
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     logger.log_message(f"Setup eval step {step} in world", master=False, level=Level.DEBUG)
     world.setup_step(step, num_micro_steps=num_micro_steps, type=eval_type)
@@ -165,7 +165,7 @@ def train_step(step: int, num_train_steps: int, inner_model: nn.Module, outer_mo
 
     # Setup step
     num_micro_steps = config.train.batch_size // config.train.micro_batch_size
-    num_micro_steps_per_device = num_micro_steps // (len(world.stage2ranks[world.num_stages-1])) # TODO: How to scale w/ heterogenity?
+    num_micro_steps_per_device = max(1, num_micro_steps // (len(world.stage2ranks[world.num_stages-1]))) # TODO: How to scale w/ heterogenity?
     tokens_per_micro_batch = config.train.micro_batch_size * config.data.seq_length
     logger.log_message(f"Setup train step {step} in world", master=False, level=Level.DEBUG)
     world.setup_step(step, num_micro_steps=num_micro_steps)
@@ -389,6 +389,12 @@ def main(config: SwarmConfig):
     # Load dataset (NB: Must be pre-tokenized)
     data = get_dataset(config.data, split="train")
     logger.log_message(f"Loaded dataset {config.data.path} with {format_int(len(data))} examples", master=True, level=Level.INFO)
+
+    # Tokenize (optional)
+    if config.data.tokenize:
+        seq_length = config.data.seq_length + 1
+        data = data.map(lambda x: tokenize(x["text"], tokenizer, seq_length, return_tensors=None), remove_columns=["text"])
+        logger.log_message(f"Tokenized dataset {config.data.path} with {format_int(len(data))} examples", master=True, level=Level.INFO)
     
     # Split dataset
     train_val_dict = data.train_test_split(test_size=config.eval.eval_size, shuffle=True, seed=config.train.seed)
@@ -396,8 +402,8 @@ def main(config: SwarmConfig):
     logger.log_message(f"Split dataset {config.data.path} into {format_int(len(train_data))} train, {format_int(len(val_data))} validation examples", master=True, level=Level.INFO)
 
     # Setup data loaders
-    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False)
-    eval_dataloader = get_dataloader(val_data, batch_size=config.train.batch_size, shuffle=False)
+    train_dataloader = get_dataloader(train_data, batch_size=config.train.batch_size, shuffle=False, pin_memory=config.data.pin_memory, num_workers=config.data.num_workers)
+    eval_dataloader = get_dataloader(val_data, batch_size=config.train.batch_size, shuffle=False, pin_memory=config.data.pin_memory, num_workers=config.data.num_workers)
 
     # Compute number of training steps
     num_train_steps = get_num_steps(config.train.max_steps, config.train.max_epochs, len(train_data), config.train.batch_size)

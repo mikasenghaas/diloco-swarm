@@ -17,6 +17,9 @@ class DataConfig(BaseConfig):
     seq_length: int = 1024
     num_workers: int = 1
     subset_size: float = 1.0
+    tokenize: bool = False
+    pin_memory: bool = True
+    num_workers: int = 4
 
 class OptimizerConfig(BaseConfig):
     type: Literal["SGD", "AdamW", "None"]
