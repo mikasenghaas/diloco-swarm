@@ -5,7 +5,7 @@ This repository contains the full experiment code and results for validating DiL
 ## 🔗 Shortcuts
 
 - 📄 Read the [report](report.pdf)
-- 📊 View raw and analyzed experiment results in [W&B](https://wandb.ai/mikasenghaas/diloco-swarm) and this  [notebook](notebooks/4.0-results.ipynb)
+- 📊 View raw and analyzed experiment results in [W&B](https://wandb.ai/mikasenghaas/diloco-swarm) and this  [notebook](notebooks/3.0-results.ipynb)
 - 🧠 Understand DP, PP, DiLoCo, SWARM, and their interplay in this pure PyTorch
 single-file [training script]() - distilled from this codebase
 - 💻 Replicate the experiments following the [setup](#setup) and [replicating experiments](#replicating-experiments) sections below.
