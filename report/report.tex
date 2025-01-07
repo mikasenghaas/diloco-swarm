@@ -115,9 +115,8 @@ Operating at such scale requires orchestrating thousands of GPUs to distribute
 computation~\cite{dubey2024llama3,deepseekai2024}. However, traditional
 parallelization techniques rely on fast interconnect to not bottleneck the
 training. Hence, frontier-scale models are currently trained in high performance
-clusters (HPC). Operating HPCs requires billions of dollars, leaving research
-capabilities to a small number of corporate and state
-entities~\cite{jaghouar2024intellect1}. 
+clusters (HPC). Operating HPCs is costly, leaving research capabilities to a
+small number of corporate and state entities~\cite{jaghouar2024intellect1}. 
 
 % This creates significant points of control, and in turn increases the risk of
 % capability capture or misue.
@@ -125,14 +124,12 @@ entities~\cite{jaghouar2024intellect1}.
 % Decentralized training
 Recently, decentralization has emerged as a promising counter-weight to this
 trajectory. Decentralized training aims to pool the vast, cheap compute
-resources across the globe for collaborative model training. It promises smaller
-actors access to large-scale compute at significantly reduced cost, with the
-potential to accelerate open-source AI development.  However, this new paradigm
-comes with significant technical and algorithmic challenges: nodes have to
-communicate via common internet connections, leading to orders of magnitude
-lower network bandwidths, and the pool of training nodes can be heterogeneous -
-nodes may have varying performance - and dynamic - nodes may join or leave
-training unpredictably.
+resources across the globe for collaborative model training efforts. However,
+this new paradigm brings significant technical and algorithmic challenges. Most
+prominently, training algorithms have to accomodate orders-of-magnitude slower
+interconnect, hetereogeneous compute pools, and nodes dynamically joining or
+leaving the training. 
+% TODO: Potentially remove dynamic world size to focus on fitting larger models
 
 % Intellect-1 and DiLoCo
 Hence, current decentral training efforts can not yet match the scale and
@@ -144,42 +141,41 @@ trained across three continents. The model is a scale-up of
 DiLoCo~\cite{douillard2023diloco}, a low-cost communication distributed data
 parallel (DDP) training method. Compared to traditional DDP, DiLoCo's key
 insight is to replace regular gradient synchronization at every step with less
-frequent synchronization using an dual optimization scheme. Their empirical
+frequent synchronization using a dual optimization scheme. Their empirical
 results show that the method preserves performance while requiring a fraction of
 the communication cost, i.e. only every 500 steps. The experiments have since
-been replicated~\cite{jaghouar2024opendiloco}, and engineered further to enable
-billion-parameter training runs in the form of
-INTELLECT-1~\cite{jaghouar2024intellect1}.  However, a key limitation is that
-each node has to store a full copy of the model to participate during training,
-and that heterogeneous compute can bottlenecks compute utilization. For this
-reason, the minimum requirement for a node were 8xH100 GPUs to contribute to
-training INTELLECT-1.
+been replicated~\cite{jaghouar2024opendiloco}, and
+scaled~\cite{jaghouar2024intellect1}, underlining the robustness of the
+approach. However, like traditional data parallel training, a key limitation is
+that each node has to store a full copy of the model to participate during
+training. Further, in heterogeneous compute setups,  faster hardware is becomes
+underutilized. Hence, only powerful 8xH100 GPU racks were allowed for training
+INTELLECT-1.
 
 % SWARM
 SWARM~\cite{ryabinin2023swarm} parallelism is a promising, but less explored,
 alternative for decentralized training that is designed for larger scale. Unlike
 DiLoCo, which relies solely on data parallelism, SWARM combines two types of 
-parallelism - data and pipeline paralleparallelism. By also sharding the model,
-SWARM can scale to larger models, or vice versa, allow lower-end devices to
-participate in training. This makes it an attractive candidate for further
-scaling decentralized training efforts. In its original formulation, SWARM
-requires gradient synchronization between all nodes serving the same pipeline
-stage of a model. 
+parallelism - data and pipeline parallel. By also sharding the model, SWARM can
+scale to larger models, or vice versa, allow lower-end devices to participate in
+training. This makes it an attractive candidate for further scaling
+decentralized training efforts. In its original formulation, SWARM requires
+gradient synchronization between all nodes serving the same pipeline stage of a
+model. 
 
 % DiLoCo-SWARM
-The successes and robustness of DiLoCo motivates this research which
-investigates whether step-wise gradient synchronization in SWARM pipeline stages
-can be replaced by DiLoCo-style synchronization. We make the following two
-contributions:
+The above two approaches motivate this research, which investigates whether
+step-wise gradient synchronization in SWARM pipeline stages can be replaced by
+DiLoCo-style synchronization. In summary, we make the following two contributions:
 
 \begin{enumerate}
   \item \textbf{DiLoCo-SWARM.} We show that SWARM parallelism is compatible with
-  DiLoCo-style gradient synchronization, allowing to train SWARM while requiring
-  significantly fewer synchronization of gradients while retaining
-  generalization performance.
+  DiLoCo-style gradient synchronization. While requiring \textit{50x fewer
+  gradient updates}, we obtain a validation perplexity of \textit{30.15},
+  exceeding the synchronous baseline of \textit{30.22}.
   \item \textbf{Implementation.} We release a minimal training script
   implementing a feature subset of SWARM parallelism, as well the DiLoCo
-  optimizer.  Instead of multiple thousands, the implementation uses a few
+  optimizer. Instead of multiple thousands, the implementation uses a few
   hundred lines of pure PyTorch code.
 \end{enumerate}
 
@@ -187,8 +183,7 @@ Besides open-sourcing the full experiment code and results on \github{} and
 \wandb{}, we release a distilled version of the training logic as a \gist{}. We
 hope that these resources will serve as a starting point for further open-source
 research efforts with SWARM, and spark interest in scaling SWARM from research
-to
-production-grade systems, similarly to development of DiLoCo.
+to production-grade systems, similarly to the development of DiLoCo.
 
 \section{Background}
 
