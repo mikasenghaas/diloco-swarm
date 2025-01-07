@@ -12,6 +12,7 @@
 \usepackage{subcaption}
 \usepackage{listings}
 \usepackage{float}
+\usepackage{tcolorbox}
 
 % Aliases
 \newcommand{\github}{\href{https://github.com/mikasenghaas/diloco-swarm}{GitHub}}
@@ -21,6 +22,12 @@
 % Colors
 \definecolor{bblue}{HTML}{5884E2}
 \definecolor{oorange}{HTML}{F19E38}
+
+% Colored boxes
+\newcommand{\orangebox}{\tcbox[size=minimal,boxrule=0pt,arc=3pt,
+  colback=oorange!50,colframe=oorange!50,left=1pt,right=1pt,top=1pt,bottom=1pt]{\phantom{x}}}
+\newcommand{\bluebox}{\tcbox[size=minimal,boxrule=0pt,arc=3pt,
+  colback=bblue!50,colframe=bblue!50,left=1pt,right=1pt,top=1pt,bottom=1pt]{\phantom{x}}}
 
 % Code
 \definecolor{codegreen}{rgb}{0,0.6,0}
@@ -43,6 +50,7 @@
 
 % Running Title
 \icmltitlerunning{DiLoCo-SWARM}
+
 
 \begin{document}
 
@@ -132,9 +140,9 @@ leaving the training.
 % TODO: Potentially remove dynamic world size to focus on fitting larger models
 
 % Intellect-1 and DiLoCo
-Hence, current decentral training efforts can not yet match the scale and
-efficiency of the centralized setting. Yet, the field is progressing rapidly and
-is gaining interest in the research community.
+For this reason, current decentral training efforts can not yet match the scale
+and efficiency of the centralized setting. Yet, the field is progressing rapidly
+and gaining interest in the research community.
 INTELLECT-1~\cite{jaghouar2024intellect1} is the most recent demonstration that
 large-scale decentral model training is possible. It is a 10B parameter model
 trained across three continents. The model is a scale-up of
@@ -166,8 +174,10 @@ model.
 % DiLoCo-SWARM
 The above two approaches motivate this research, which investigates whether
 step-wise gradient synchronization in SWARM pipeline stages can be replaced by
-DiLoCo-style synchronization. In summary, we make the following two contributions:
+DiLoCo-style synchronization. We term this method DiLoCo-SWARM. Our key findings
+and contributions can be summarized as follows:
 
+% TODO: Maybe mention results from ablations
 \begin{enumerate}
   \item \textbf{DiLoCo-SWARM.} We show that SWARM parallelism is compatible with
   DiLoCo-style gradient synchronization. While requiring \textit{50x fewer
@@ -190,11 +200,10 @@ to production-grade systems, similarly to the development of DiLoCo.
 \subsection{Distributed Training}
 
 In distributed training, $n$ nodes collaboratively train a \textit{model}
-$f_{\theta}$ parameterized by its weights $\theta$, on a \textit{dataset} of
-samples $D = \{(\mathbf{x}_e, \mathbf{y}_1),\dots\}$. Collaboration requires
-nodes to periodically communicate intermediate results. We will describe two of
-the most widely used forms of parallelization, relevant in the context of
-DiLoCo-SWARM.
+$f_{\theta}$ parameterized by weights $\theta$, on a \textit{dataset} of samples
+$D = \{(\mathbf{x}_1, \mathbf{y}_1),\dots\}$. Collaboration requires nodes to
+periodically communicate intermediate results. We will describe two popular
+parallelization techniques relevant in the context of DiLoCo-SWARM.
 
 \begin{figure}[ht]
     \centering
@@ -202,30 +211,35 @@ DiLoCo-SWARM.
         \centering
         \includegraphics[width=\textwidth]{figures/dp.png}
         \caption{Data Parallelism}
+        \label{fig:dp}
     \end{subfigure}
     \hfill
     \begin{subfigure}[b]{0.22\textwidth}
         \centering
         \includegraphics[width=\textwidth]{figures/pp.png}
         \caption{PP Parallelism}
+        \label{fig:pp}
     \end{subfigure}
-    \caption{\textbf{DP and PP Communication} High-level visualization of DP and
-    PP communication patterns for $n=3$ nodes. Nodes are represented as boxes,
-    communication as links. {\color{bblue} Blue links} represent
-    \texttt{AllReduce} operations to average gradients between nodes. 
-    {\color{oorange}Orange links} represent bi-directional point-to-point
-    communication between adjacent stages.}
-    \label{fig:dp-pp}
+    \caption{\textbf{DP and PP Communication} Communication patterns for $n=3$
+    DP and PP groups. Nodes are represented as boxes, communication as links.
+    {\color{bblue} Blue links} represent DP communication, i.e.
+    \texttt{AllReduce} to average gradients between nodes.
+    {\color{oorange}Orange links} represent PP communication, i.e.
+    bi-directional point-to-point communication between nodes in adjacent
+    stages.}
 \end{figure}
 
-\textit{Data parallelism} (DP) partitions the dataset, creating $n$ data shards
-$D_1,\dots,D_n$. The $i$-th node only holds a (local) data shard $D_i$ and a
-copy of the full model parameters $\theta$. Training proceeds as shown in
-Algorithm~\ref{alg:dp}: Each node samples a batch from its local data shard,
-computes local gradients via a full forward and backward pass, but before
-updating the model, averages the gradients from all workers via an
-\texttt{AllReduce} operation. DP communication cost scales with the number of
-model parameters and number of nodes.
+\textit{Data parallelism} (DP)~\cite{dean2012dp} partitions the dataset,
+creating $n$ data shards $D_1,\dots,D_n$. The $i$-th node holds a local data
+shard $D_i$ and a copy of the full model parameters $\theta$. Training proceeds
+as shown in Algorithm~\ref{alg:dp}: First, each node samples a batch from its
+data shard and computes local gradients via a full forward and backward pass.
+Next, all nodes average their local gradients into an identical global gradient
+and perform the same model update. The all-to-all communication, as visualized
+in Figure~\ref{fig:dp}, is typically enabled by an
+\texttt{AllReduce}~\cite{walker1995mpi} operation.
+
+% DP communication becomes costlier as the number of model parameters and nodes increases.
 
 \begin{algorithm}
 \caption{Data Parallel Gradient Synchronization}
@@ -233,41 +247,68 @@ model parameters and number of nodes.
 \begin{algorithmic}
 \STATE {\bfseries Input:} Local Dataset $D_i$, Model $\theta^{(t-1)}$, Optimizer $\mathtt{OPT}$, Loss $\mathcal{L}$
 \STATE Sample batch: $x_i\sim D_i$
-\STATE Compute gradient: $g_i \gets \nabla_{\theta_i} \mathcal{L}(x_i; \theta^{(t-1)})$
+\STATE Compute gradient: $g_i \gets \nabla_{\theta^{(t-1)}} \mathcal{L}(x_i; \theta^{(t-1)})$
 \STATE Sync gradients: $g \gets \frac{1}{n}\sum_{i}^n g_i$ \COMMENT{$\mathtt{AllReduce}$}
-\STATE Update model: $\theta_i^{(t)} \gets \mathtt{OPT}(\theta_i^{(t-1)}, g)$
+\STATE Update model: $\theta_i^{(t)} \gets \mathtt{OPT}(\theta^{(t-1)}, g)$
 \end{algorithmic}
 \end{algorithm}
 
-\textit{Pipeline parallelism} (PP) partitions the model, creating $n$ model
-shards $f'$ parameterized by $\theta_1,\dots,\theta_n$, such that the full model
-is reconstructed by concatenation of the shards, i.e.
-$f_{\theta}=f'_{\theta_1}\circ\dots\circ f'_{\theta_n}$. Due to the sequential
-dependency, shards represent "stages" in the pipeline, where the $i$-th stage
-serves the model shard $f_{\theta_i}$. For most deep learning model such a
-sequential partition is natural, as they are architected as repeated
-computational blocks. For example, in Transformer one stage handles one or more
-Transformer blocks consisting of attention and feed-forward
-layers~\cite{vaswani2017transformer}. The partitioning creates a bi-directional
-communication pattern between stages during training, as shown in
-Figure~\ref{fig:dp-pp}: During a forward pass activations are communicated from
+\textit{Pipeline parallelism} (PP)~\cite{huang2019gpipe} partitions the model,
+creating $n$ model shards $f^{(1)},\dots,f^{(n)}$ parameterized by
+$\theta_1,\dots,\theta_n$, such that the full model is represented as a pipeline
+of form $f_{\theta}=f^{(1)}_{\theta_1}\circ\dots\circ f^{(1)}_{\theta_n}$. Model
+shards are often referred to as "stages" in the pipeline, where the $i$-th stage
+serves the model shard $f^{(i)}_{\theta_i}$.  For deep learning architectures
+such a layer-wise partition is natural, as they are typically architected as
+repeated computational blocks, e.g. convolutional blocks in
+CNNs~\cite{krizhevsky2012alexnet} and Transformer blocks in
+Transformer~\cite{vaswani2017transformer} The partitioning creates a
+bi-directional communication pattern between stages during training, as shown in
+Figure~\ref{fig:pp}: During a forward pass activations are communicated from
 stage $i$ to $i+1$, and during the backward pass gradients are sent from stage
 $i$ to $i-1$. Despite its simplicity, PP is notoriously hard to optimize. Naive
 implementations suffer from significant GPU idle time, e.g. when the first node
 has to wait for the full pipeline forward and backward pass before being able to
-compute gradients. Efficient PP implementations therefore rely on micro-batching
-and advanced scheduling techniques to be practically viable. PP communication
-scales with the number of stages $n$ and the model's hidden dimension.
+compute its local gradient. Efficient PP implementations therefore rely on
+micro-batching and advanced scheduling techniques to be practically
+viable~\cite{harlap2018pipedream, huang2019gpipe}. 
 
-Typically, different forms of parallelism can be combined. In the case of DP and
-PP, a natural combination is to partition both the dataset and model into
-$\{D_i\}_{i\in [m]}$ and $\{\theta_j\}_{j\in [n]}$, respectively. This creates a
-$m\times n$ grid structure, where the $(i,j)$-th node handles data shard $D_i$
-and model shard $\theta_j$. During training, DP and PP communication is
-interleaved: First, nodes send activations and gradients (PP communication)
-within each of the $i=1\dots,m$ pipelines to accumulate local gradients. Then,
-within each stage $j=1,\dots,n$, the nodes run an \texttt{AllReduce} to average
-accumulated gradients for their local shard (DP communication).
+
+% PP communication cost scales with the number of stages $n$, the micro batch size and the model's hidden dimension, but 
+
+DP and PP can be combined. It is natural to partition both the dataset and model
+into $\{D_i\}_{i\in [m]}$ and $\{\theta_j\}_{j\in [n]}$. This creates a $m\times
+n$ grid, where the $(i,j)$-th node handles data shard $D_i$ and model shard
+$\theta_j$. The emerging $m\times n$ grid structure is visualized for $9$ nodes
+distributed evenly into three stages in Figure~\ref{fig:dp-pp}. The partition of
+model and data results in independent PP ({\color{oorange} PP1, PP2, PP3}) and
+DP ({\color{bblue} DP1, DP2, DP3}) groups, shown as shaded areas. During
+training, the communication patterns are interleaved: First, nodes send
+activations and gradients (PP communication) within each PP group $i=1\dots,m$
+to accumulate local gradients. Then, within each DP group $j=1,\dots,n$, nodes
+run an \texttt{AllReduce} to average local gradients for their model shard (DP
+communication). 
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.48\textwidth]{figures/dp-pp.png}
+    \caption{\textbf{2D Parallel Communication} Communication patterns in 2D
+    (DP+PP) parallelism for $3x3$ nodes. PP and DP communication is interleaved.
+    First, nodes accumulate gradients by forward and backward passes through
+    pipelines in independent PP groups (\mbox{\orangebox}). Then,
+    they average gradients in DP groups (\mbox{\bluebox}) before
+    performing a model update.  }
+    \label{fig:dp-pp}
+\end{figure}
+
+% Optimal distributed technique
+All described parallelization techniques produce equivalent gradient updates,
+leading to identical models $\theta^{(t)}$ at any $t$. However, they
+fundamentally differ in how they distribute computation across nodes and create
+distinct communication patterns, as described. Even in centralized settings,
+identifying the optimal parallelization technique is complex as it is highly
+sensitive to the model size, as well as training, hardware and network
+setup~\cite{hagemann2024parallelization, fernandez2024scalingtrends}.
 
 \subsection{DiLoCo}
 
@@ -346,7 +387,9 @@ stages to distribute workload.
 % TODO: Add key observation of square-cube law
 % -> DP communication scales cubic, PP communication only quadratic
 
-\subsection{DiLoCo-SWARM}
+\section{DiLoCo-SWARM}
+
+\subsection{Algorithm}
 
 One of two communication types in SWARM relies on costly gradient
 synchronization between nodes in pipeline stages at every step. The success and
@@ -356,7 +399,7 @@ Algorithm~\ref{alg:diloco} as a drop-in replacement for regular gradient
 synchronization within SWARM pipeline stages. We refer to this method as
 DiLoCo-SWARM.
 
-\section{Implementation}
+\subsection{Implementation}
 
 % Question: Should I go in detail to explain the implementation?
 
