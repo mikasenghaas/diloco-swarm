@@ -14,6 +14,10 @@
 \usepackage{float}
 \usepackage{tcolorbox}
 \usepackage{algorithm, algpseudocodex}
+\usepackage{epstopdf}
+
+% Graphics
+\DeclareGraphicsExtensions{.png,.pdf}
 
 % Aliases
 \newcommand{\github}{\href{https://github.com/mikasenghaas/diloco-swarm}{GitHub}}
@@ -207,16 +211,16 @@ parallelization techniques relevant in the context of DiLoCo-SWARM.
 
 \begin{figure}[ht]
     \centering
-    \begin{subfigure}[b]{0.22\textwidth}
+    \begin{subfigure}[b]{0.45\textwidth}
         \centering
-        \includegraphics[width=\textwidth]{figures/dp.png}
+        \includegraphics[width=\textwidth]{figures/dp.pdf}
         \caption{Data Parallelism}
         \label{fig:dp}
     \end{subfigure}
     \hfill
-    \begin{subfigure}[b]{0.22\textwidth}
+    \begin{subfigure}[b]{0.45\textwidth}
         \centering
-        \includegraphics[width=\textwidth]{figures/pp.png}
+        \includegraphics[width=\textwidth]{figures/pp.pdf}
         \caption{PP Parallelism}
         \label{fig:pp}
     \end{subfigure}
@@ -280,7 +284,7 @@ PP. It is natural to partition both the dataset and model into $\{D_i\}_{i\in
 [m]}$ and $\{\theta_j\}_{j\in [n]}$. This creates a $m\times n$ grid, where the
 $(i,j)$-th node handles data shard $D_i$ and model shard $\theta_j$. The
 emerging $m\times n$ grid structure is visualized for $9$ nodes distributed
-evenly into three stages in Figure~\ref{fig:dp-pp}. The partition of model and
+evenly into three stages in Figure~\ref{fig:dpp}. The partition of model and
 data results in independent PP ({\color{oorange} PP1, PP2, PP3}) and DP
 ({\color{bblue} DP1, DP2, DP3}) groups, shown as shaded areas. During training,
 the communication patterns are interleaved: First, nodes send activations and
@@ -291,14 +295,14 @@ communication).
 
 \begin{figure}[ht]
     \centering
-    \includegraphics[width=0.48\textwidth]{figures/dp-pp.png}
-    \caption{\textbf{2D Parallel Communication.} Communication patterns in 2D
+    \includegraphics[width=0.48\textwidth]{figures/dpp.pdf}
+    \caption{\textbf{DPP.} Communication patterns in 2D
     (DP+PP) parallelism for $3x3$ nodes. PP and DP communication is interleaved.
     First, nodes accumulate gradients by forward and backward passes through
     pipelines in independent PP groups (\mbox{\orangebox}). Then,
     they average gradients in DP groups (\mbox{\bluebox}) before
     performing a model update.  }
-    \label{fig:dp-pp}
+    \label{fig:dpp}
 \end{figure}
 
 All described parallelization techniques produce equivalent gradient updates,
@@ -380,17 +384,7 @@ other tricks for scaling.
 
 \begin{figure}[ht]
     \centering
-    \begin{subfigure}[b]{0.45\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/dp-over-time.png}
-        \caption{Data Parallelism}
-    \end{subfigure}
-    \hfill
-    \begin{subfigure}[b]{0.45\textwidth}
-        \centering
-        \includegraphics[width=\textwidth]{figures/diloco-over-time.png}
-        \caption{DiLoCo}
-    \end{subfigure}
+    \includegraphics[width=0.45\textwidth]{figures/diloco.pdf}
     \caption{\textbf{DiLoCo.} We visualize gradient synchronization points for
     regular DP and DiLoCo training for $n=3$ nodes training for $N$ steps. In
     DP, gradients are sychronized every step. In DiLoCo, pseudo-gradients are
@@ -426,7 +420,7 @@ from node failures by "re-wiring" lost activations or gradients. In this way,
 SWARM remains functional as long as each stage is served by at least one node.
 \begin{figure}[ht]
     \centering
-    \includegraphics[width=0.45\textwidth]{figures/swarm.png}
+    \includegraphics[width=0.45\textwidth]{figures/swarm.pdf}
     \caption{\textbf{SWARM.} We visualize the communication patterns of SWARM
     for $9$ nodes in $3\times 3$ SWARM. In SWARM, nodes forward activations and
     gradients in a stochastic manner, forming DP groups after the forward and
@@ -450,7 +444,7 @@ DiLoCo groups, as visualized in Figure~\ref{fig:diloco-swarm}.
 
 \begin{figure}[ht]
     \centering
-    \includegraphics[width=0.45\textwidth]{figures/diloco-swarm.png}
+    \includegraphics[width=0.45\textwidth]{figures/diloco-swarm.pdf}
     \caption{\textbf{DiLoCo-SWARM.} We visualize the communication patterns of
     DiLoCo-SWARM for $9$ nodes in $3\times 3$ DiLoCo-SWARM. In comparison to
     regular SWARM, DiLoCo-SWARM replaces DP groups with DiLoCo groups which
