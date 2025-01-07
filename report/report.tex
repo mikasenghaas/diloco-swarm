@@ -244,7 +244,7 @@ in Figure~\ref{fig:dp}, is typically enabled by an
 \begin{algorithm}
 \caption{Data Parallel Gradient Synchronization}
 \label{alg:dp}
-\begin{algorithmic}
+\begin{algorithmic}[1]
 \STATE {\bfseries Input:} Local Dataset $D_i$, Model $\theta^{(t-1)}$, Optimizer $\mathtt{OPT}$, Loss $\mathcal{L}$
 \STATE Sample batch: $x_i\sim D_i$
 \STATE Compute gradient: $g_i \gets \nabla_{\theta^{(t-1)}} \mathcal{L}(x_i; \theta^{(t-1)})$
@@ -273,26 +273,26 @@ compute its local gradient. Efficient PP implementations therefore rely on
 micro-batching and advanced scheduling techniques to be practically
 viable~\cite{harlap2018pipedream, huang2019gpipe}. 
 
-
 % PP communication cost scales with the number of stages $n$, the micro batch size and the model's hidden dimension, but 
 
-DP and PP can be combined. It is natural to partition both the dataset and model
-into $\{D_i\}_{i\in [m]}$ and $\{\theta_j\}_{j\in [n]}$. This creates a $m\times
-n$ grid, where the $(i,j)$-th node handles data shard $D_i$ and model shard
-$\theta_j$. The emerging $m\times n$ grid structure is visualized for $9$ nodes
-distributed evenly into three stages in Figure~\ref{fig:dp-pp}. The partition of
-model and data results in independent PP ({\color{oorange} PP1, PP2, PP3}) and
-DP ({\color{bblue} DP1, DP2, DP3}) groups, shown as shaded areas. During
-training, the communication patterns are interleaved: First, nodes send
-activations and gradients (PP communication) within each PP group $i=1\dots,m$
-to accumulate local gradients. Then, within each DP group $j=1,\dots,n$, nodes
-run an \texttt{AllReduce} to average local gradients for their model shard (DP
+It is possible to design \textit{hybrid parallelism} (DPP) which combines DP and
+PP. It is natural to partition both the dataset and model into $\{D_i\}_{i\in
+[m]}$ and $\{\theta_j\}_{j\in [n]}$. This creates a $m\times n$ grid, where the
+$(i,j)$-th node handles data shard $D_i$ and model shard $\theta_j$. The
+emerging $m\times n$ grid structure is visualized for $9$ nodes distributed
+evenly into three stages in Figure~\ref{fig:dp-pp}. The partition of model and
+data results in independent PP ({\color{oorange} PP1, PP2, PP3}) and DP
+({\color{bblue} DP1, DP2, DP3}) groups, shown as shaded areas. During training,
+the communication patterns are interleaved: First, nodes send activations and
+gradients (PP communication) within each PP group $i=1\dots,m$ to accumulate
+local gradients. Then, within each DP group $j=1,\dots,n$, nodes run an
+\texttt{AllReduce} to average local gradients for their model shard (DP
 communication). 
 
 \begin{figure}[ht]
     \centering
     \includegraphics[width=0.48\textwidth]{figures/dp-pp.png}
-    \caption{\textbf{2D Parallel Communication} Communication patterns in 2D
+    \caption{\textbf{2D Parallel Communication.} Communication patterns in 2D
     (DP+PP) parallelism for $3x3$ nodes. PP and DP communication is interleaved.
     First, nodes accumulate gradients by forward and backward passes through
     pipelines in independent PP groups (\mbox{\orangebox}). Then,
@@ -301,7 +301,6 @@ communication).
     \label{fig:dp-pp}
 \end{figure}
 
-% Optimal distributed technique
 All described parallelization techniques produce equivalent gradient updates,
 leading to identical models $\theta^{(t)}$ at any $t$. However, they
 fundamentally differ in how they distribute computation across nodes and create
@@ -310,24 +309,49 @@ identifying the optimal parallelization technique is complex as it is highly
 sensitive to the model size, as well as training, hardware and network
 setup~\cite{hagemann2024parallelization, fernandez2024scalingtrends}.
 
+% \subsection{Decentralized Training}
+% 
+% Decentralized training may be viewed a special form of distributed training
+% subject to additional constraints imposed by typical hardware and network
+% conditions in globally distributed node pools.
+% 
+% \begin{enumerate}
+%   \item \textit{Slow Interconnect:} The average bandwidth is typically
+%   orders-of-magnitude lower than in typical HPC settings.
+%   \item \textit{Network Heterogenity:} Interconnect may vary greatly between
+%   different pair of nodes, resulting in asymmetric communication.
+%   \item \textit{Device Heterogenity:} Devices may range from low-end to high-end
+%   \item \textit{Dynamic World Size:} Devices may leave or enter the training at any time
+% \end{enumerate}
+% 
+% In this setting, traditional parallelization methods become
+% \textit{communication-bound}. This means that the majority of the training time
+% is spent waiting for networking operations to follow, leading to low device
+% utilization.  It follows that such systems are not scalable, as adding more or
+% better compute simply results in more idle time. Decentralized settings
+% therefore require algorithmic innovations that make traditional methods more
+% scalable.
+
 \subsection{DiLoCo}
 
-In the decentralized setting, interconnect may be slow and so regular gradient
-synchronization as shown in Algorithm~\ref{alg:dp} can bottleneck the training
-process, especially when scaling to larger models. Distributed Low-Cost
-Communication (DiLoCo)~\cite{douillard2023diloco} is data parallel training method
-which reduces the frequency at which gradients are synchronized via a dual
-optimization scheme. As shown in Algorithm~\ref{alg:diloco} each node trains for
-a fixed number of inner steps using a local optimizer. To synchronize with the
-remaining workers, it computes and averages its pseudo-gradient (the difference
-between the parameters before and after the inner optimization.) with all nodes
-via \texttt{AllReduce} to update a global model using an global optimizer. 
+In the decentralized setting synchronizing gradients every step
+(Algorithm~\ref{alg:dp}) may be prohibitive due to slow interconnect.
+DiLoCo~\cite{douillard2023diloco} adapts traditional DP to the decentral
+setting by significantly reducing the required synchronization frequency. It is
+based on a local-global optimization scheme, described in
+Algorithm~\ref{alg:diloco}. Each worker $i=1,\dots,n$ in a world of
+$n$ nodes has access to a local data shard $D_i$ and stores a full model replica
+$\theta$. Training proceeds by each node training locally for a fixed number of
+$H$ steps using a local optimizer. To synchronize, each node computes and
+averages its pseudo-gradient (the difference between the parameters before and
+after the inner optimization) to update a global model using an global
+optimizer. Training proceeds iteratively, starting from the shared global model.
 
 \begin{algorithm}
 \caption{DiLoCo Gradient Synchronization}
 \label{alg:diloco}
 \begin{algorithmic}[1]
-\STATE \textbf{Input:} Local dataset $D_i$, Model $\theta^{(t-1)}$, Optimizers $\mathtt{OPT}_{\text{local}}$ and $\mathtt{OPT}_{\text{global}}$, Loss $\mathcal{L}$, Local Steps $H$ 
+\STATE \textbf{Input:} Local dataset $D_i$, Model $\theta^{(t-1)}$, Optimizers $\mathtt{OPT}_{\text{local}}$ and $\mathtt{OPT}_{\text{global}}$, Loss $\mathcal{L}$, Num. Local Steps $H$ 
 \STATE Copy global model: $\theta_i^{(t-1)} \gets \theta^{(t-1)}$
 \FOR{$H$ steps}
   \STATE Sample batch: $x \sim D_i$
@@ -340,54 +364,86 @@ via \texttt{AllReduce} to update a global model using an global optimizer.
 \end{algorithmic}
 \end{algorithm}
 
-Empirical results show that DiLoCo drastically reduces the frequency at which
-gradients need to be synchronized. Despite only synchronizing every $500$ local
-steps, they can match the generalization performance of a DP baseline. However,
-DiLoCo shares many challenges with traditional data parallel training. Most
-notably, DiLoCo does not scale naturally to models that do not fit into the
-local workers' memory - relying on slow parameter offloading
-methods~\cite{rhu2016, cui2016}, gradient quantization~\cite{jaghouar2024intellect1} and
-other tricks for scaling, which come at the cost of reduced efficiency for
-scaling, which come at the cost of reduced efficiency
+Figure~\ref{fig:diloco} compares DP and DiLoCo, visualizing the points of
+synchrony throughout training. Clearly, DiLoCo reduces the communication cost by
+a factor of $1/H$, allowing each node to independently perform its inner
+optimization loop for $H$ steps. The key insight is that $H>>1$ without
+negatively effecting generalization performance. Empirical
+evidence~\cite{douillard2023diloco,jaghouar2024opendiloco} shows that DiLoCo
+with $H=500$ local steps matches the generalization performance of a DP
+baseline, i.e. we can obtain the same performance but with 500x less
+communication. However, DiLoCo shares many challenges with traditional data
+parallel training. Most notably, DiLoCo does not scale to models that do not fit
+into the local workers' memory - relying on slow parameter offloading
+methods~\cite{cui2016}, gradient quantization~\cite{jaghouar2024intellect1} and
+other tricks for scaling.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/dp-over-time.png}
+        \caption{Data Parallelism}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/diloco-over-time.png}
+        \caption{DiLoCo}
+    \end{subfigure}
+    \caption{\textbf{DiLoCo.} We visualize gradient synchronization points for
+    regular DP and DiLoCo training for $n=3$ nodes training for $N$ steps. In
+    DP, gradients are sychronized every step. In DiLoCo, pseudo-gradients are
+    synchronized every $H=3$ local steps, reducing the total communication
+    cost by a factor of $1/3$.}
+    \label{fig:diloco}
+\end{figure}
+
 
 \subsection{SWARM}
 
-PP presents itself as a natural solution. However, in its original formulation 
-it does handle heterogeneous and dynamic node setups well, as often found in
-decentralized settings. Due to its inherently sequential nature, the pipeline is
-bottlenecked by its weakest link, leading to idle time for quicker workers.
-Furthermore, a single node failure will stall the entire training procedure,
-rendering the algorithm not fault-tolerant.
+Sharding the model is a natural solution to circumvent the memory limitations of
+DP methods. However, traditional PP is not well suited for decentral settings.
+Due to its inherently sequential nature, the pipeline is bottlenecked by its
+weakest link (either device or network), leading to signifcant idle time for
+faster nodes. Furthermore, a single node failure will stall the entire training
+procedure.
 
-SWARM parallelism~\cite{ryabinin2023swarm} proposes a decentralized training
-framework combining DP and PP. Instead of organizing nodes in a rigid
-two-dimensional grid, SWARM constructs stochastic pipelines on-the-fly, as shown
-in Figure~\ref{fig:swarm}. First, activations are forwarded stochastically based
-on statistical estimates on the throughput of adjacent peers. This ensures that
-faster or better-connected nodes receive more requests and sit less idle in
-heterogeneous compute settings. Once all micro batches within a step are
-processed, local gradients of models shards are averaged within pipeline stages
-via an \texttt{AllReduce}. Further mechanisms ensure the algorithm's resilience
-to faults: For examle, forward or backward requests which are not fulfilled
-after some timeout, are re-routed and the suspected node is temporarily excluded
-from training. Further, nodes periodically switch from under- to overutilised
-stages to distribute workload.
+SWARM parallelism~\cite{ryabinin2023swarm} proposes a fault-tolerant DPP
+realization. Instead of organizing nodes in a rigid grid, SWARM constructs
+stochastic pipelines on-the-fly, as illustrated in Figure~\ref{fig:swarm}.
+During the forward pass, activations are forwarded to any peer in the subsequent
+stage with probability proportional to each peer's throughput. During the
+backward pass, gradients follow reversed paths, such that each node can
+accumulate local gradients. Once all micro batches are processed, nodes within a
+SWARM stage form DP groups, and synchronize their local gradients before
+performing the model update. \textit{Stochastic wiring} has two benefits. On the
+one hand, it naturally distributes workload even in heterogeneous compute and
+network settings. On the other hand, it enables the SWARM pipeline to recover
+from node failures by "re-wiring" lost activations or gradients. In this way,
+SWARM remains functional as long as each stage is served by at least one node.
 
-\begin{figure}[ht]
-  \centering
-  \includegraphics[width=0.45\textwidth]{figures/swarm.png}
-  \caption{\textbf{SWARM Communication} We show high-level communication
-  patterns in a 3x3 SWARM. SWARM interleaves PP and DP communication: First,
-  activations take stochastic forward route through pipeline stages, gradients
-  follow the same path backwards such that nodes accumulate gradients. Finally,
-  gradients are averaged within stages via \texttt{AllReduce}.}
-  \label{fig:swarm}
-\end{figure}
-
-% TODO: Add key observation of square-cube law
-% -> DP communication scales cubic, PP communication only quadratic
+% TODO: Add square-cube law -> DP scales cubic, PP quadratic
 
 \section{DiLoCo-SWARM}
+
+\begin{figure*}[ht]
+  \centering
+  \begin{subfigure}[b]{0.4\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{figures/swarm.png}
+      \caption{SWARM}
+      \label{fig:swarm}
+  \end{subfigure}
+  \hspace{1cm}
+  \begin{subfigure}[b]{0.4\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{figures/diloco-swarm.png}
+      \caption{DiLoCo-SWARM}
+      \label{fig:diloco-swarm}
+  \end{subfigure}
+  \caption{\textbf{DiLoCo-SWARM.}}
+\end{figure*}
 
 \subsection{Algorithm}
 
