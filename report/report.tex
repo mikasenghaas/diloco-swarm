@@ -7,7 +7,7 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{multirow}
-\usepackage{amsmath}
+\usepackage{amsmath, amssymb}
 \usepackage{xcolor}
 \usepackage{subcaption}
 \usepackage{listings}
@@ -56,7 +56,6 @@
 % Running Title
 \icmltitlerunning{DiLoCo-SWARM}
 
-
 \begin{document}
 
 \begin{titlepage}
@@ -75,15 +74,15 @@
     
     \vspace{1cm}
     
-    \large{\textsc{Mika SENGHAAS}\\\texttt{mika.senghaas@epfl.ch}}
+    \large{\textsc{Mika Senghaas}\\\texttt{mika.senghaas@epfl.ch}}
     \vspace{\stretch{1}}
     
     \large{
       \textit{Supervisors}\\
-      \textsc{Martijn DE VOS}, \textsc{Akash DHASADE}, \textsc{Rishi SHARMA}}\\
+      \textsc{Martijn De Vos}, \textsc{Akash Dhasade}, \textsc{Rishi Sharma}}\\
       \vspace{0.5cm}
       \textit{Professor}\\
-      \textsc{Anne-Marie KERMARREC}\\
+      \textsc{Anne-Marie Kermarrec}\\
       \vspace{0.5cm}
       \large{\textit{Laboratory}\\
       Scalable Computing Systems (SaCS)\\
@@ -684,14 +683,11 @@ communication cost by a factor of $1/H$ in the limit of large models.
 \begin{figure}[ht]
   \centering
   \includegraphics[width=0.45\textwidth]{figures/square-cube-law.pdf}
-  \caption{\textbf{Communication Cost Scaling} We show the communication cost
-  incurred by DP and PP communication for 4x2 SWARMs in our common training
-  setup.  For small models, PP communication dominates the total communication
-  cost. However, for larger models, DP communication dominates the total
-  communication cost.} 
+  \caption{\textbf{Communication Cost Scaling} We show the (log) communication
+  cost incurred by DP and PP communication for 4x2 SWARMs in the common training
+  setup. Because of the square-cube law, PP communication dominates the total communication for smaller models, but DP communication dominates for larger models.} 
   \label{fig:square-cube-law}
 \end{figure}
-
 
 % Experiment 2: Ablation on communication frequency
 \textbf{Communication Frequency.} We are interested in how \textit{infrequently}
@@ -776,12 +772,12 @@ batch size.
 % \label{tab:experiment3}
 % \end{table}
 
-Table~\ref{tab:experiment3} shows with DiLoCo we obtain a constant improvement
+Figure~\ref{fig:experiment3} shows with DiLoCo we obtain a constant improvement
 of $\sim$18\% over the single-node baseline run, for all tested model sizes.
 This finding suggests that gradient synchronization with DiLoCo scales to larger
-models sizes. This is an important finding as SWARM is designed to train models
-which do not naively fit into a single nodes' memory and the scaling properties
-of DiLoCo are hence crucial.
+models sizes. Especially in the light of the square-cube law, the scaling
+property of DiLoCo is crucial to be viable to train large models using
+DiLoCo-SWARM.
 
 \section{Conclusion}
 
@@ -791,7 +787,7 @@ synchronization via a dual optimization scheme is an effective tool for gradient
 synchronization, even when the gradients correspond to model shards in pipeline
 stages accumulated via stochastic forward and backward passes.
 
-These findings have implications both for the SWARM and DiLoCo community. For
+The findings have implications both for the SWARM and DiLoCo community. For
 SWARM, this means that the communication cost incurred by gradient
 synchronization within pipeline stages can be drastically reduced. Hence, future
 research and open-source efforts should focus on integrating DiLoCo-style 
@@ -800,12 +796,36 @@ the findings further underline the robustness of the method, suggesting that
 DiLoCo is a good candidate as a drop-in replacement anytime gradients need to be
 synchronized between nodes in distributed settings.
 
-\section{Limitations}
+\section{Future Work}
 
-Several limitations to this work should be noted.
+% No tuning
+This work assumed that hyperparameters found in
+DiLoCo~\cite{douillard2023diloco} apply directly to DiLoCo-SWARM. While it is
+likely that the hyperparameter provide a good starting point, it is perceivable
+that a slightly different set of hyperparameters might yield better results in
+the training setup of this work due to differences in the dataset, model and
+training algorithm. An immediate continuation of this work would therefore be to
+conduct a thorough hyper-parameter sweeps DiLoCo-SWARM and the considered
+baselines, focusing on ones that are most relevant to convergence properties of 
+the training, i.e. batch size, inner and outer learning rate and learning rate
+schedule. It is to be noted that finding the right trade-off for the compute
+budget is not always easy: Ideally, we would like to train for as long as
+possible to obtain the most robust set of hyperparameters, but this is feasible
+when models when training on huge scale. Hence, hyper-parameter tuning has to be
+conducted on smaller scale and then be extrapolated to larger scales.
+
+% Scale
+By today's standards, the GPT-2 family of models is small. Still, training on
+less than 10B tokens means that models are still in the early stage of training.
+The perplexities are still decreasing, and so the results are not yet
+representative of the full training performance. For example, in the original
+DiLoCo and SWARM experiments were conducted on a data budget of roughly 50B
+tokens per run, resulting in multiple GPU days worth of compute. While the
+results are still indicative of the efficacy of the algorithm, future work
+should simply let the models train for longer to obtain more robust results.
 
 % Environment
-All experiments were conducted on co-located GPUs with reliable and fast
+Finally, all experiments were conducted on co-located GPUs with reliable and fast
 interconnectivity. The initial premise of this research, however, was the
 decentralized setting with unreliable, heterogeneous and poorly connected
 compute resources. SWARM is only favourable over traditional parallelization
@@ -814,36 +834,17 @@ that DiLoCo-style gradient synchronization can be used in SWARM, it remains to
 show how the method behaves in a truly decentral setting when scaled to larger
 models, requiring more pipeline stages and nodes per stage.
 
-% No tuning
-Another limitation of this work is the lack of hyper-parameter tuning. All
-hyper-parameters are copied from the tuned parameters in
-DiLoCo~\cite{douillard2023diloco}. This might not always be fair, and lead to
-pessimistic estimates of the validaiton performance. However, due to the
-similarity of models, datasets, and training algorithms, we believe they are a
-good proxy. Regardless, a sensible continuation of this work would be to
-validate the results with tuned hyper-parameters.
-
-% Scale
-Moreover, it should be noted that the original DiLoCo and SWARM experiments were
-conducted on larger scale. Both train on a data budget of roughly 50B tokens per
-run, resulting in multiple GPU days worth of compute. Such resources were simply
-not available within the scope of this project but is required to obtain robust
-results on the efficacy of the algorithm.
-
 % Efficiency
 All of the above point to more more scale and compute. A crucial step is to
 integrate optimized implementations of DiLoCo and SWARM, including efficient
 pipeline scheduling techniques, allowing for fault-tolerant training over-the-
-internt. Only then, experiments can be conducted on truly larger scale and in a
-realistic environment. A particularly interesting question is how the reduced
-communication frequency of gradients impacts the wall-clock runtime of the
-algorithm in different network settings and for various model sizes.
+internet. Only then experiments can be conducted on truly larger scale and in a
+realistic environment.
 
-% Different SWARM structures
+% SWARM architecture
 Finally, another interesting, but open, research question is how the
-DiLoCo-SWARM behaves when varying the number of workers per stage. The current
-implementation does not scale beyond co-located GPUs, so investigating this
-question requires implementing peer-to-peer communication over the Internet.
+DiLoCo-SWARM behaves when varying the number of workers per stage, which is not
+discussed in this work but has implications for the scalability of the method.
 
 \section*{Acknowledgements}
 \label{sec:acknowledgements}
@@ -863,7 +864,11 @@ by Prime Intellect.
 
 \section{Appendix}
 
-% TODO: Supported and non-supported features in implementation
+% Hardware
+\subsection{Hardware}
+
+All experiments were conducted on a single node with eight co-located H100 GPUs
+on \href{https://app.primeintellect.com/}{Prime Intellect Compute}.
 
 \subsection{Training Script Invocations}
 
@@ -915,13 +920,40 @@ torchrun --nproc_per_node 4 src/train.py --swarm.num_stages 2 \
     --data @configs/data/fineweb-edu-10bt.toml
 \end{lstlisting}
 
+\subsection{Training Script Feature List}
+
+Table~\ref{tab:features} shows some of the key features supported by the
+training script, and features that are not yet supported. The fault tolerance
+mechanisms in SWARM, re-wiring and adaptive rebalancing, are difficult to
+implement in \texttt{torch.dist} as it does not support dynamic world sizes.
+Note that Single-Node training and DP, PP, DPP training are all feature subsets
+of SWARM stochastic wiring and so the script can be used to train using these
+algorithms simply by setting the appropriate parameters (see above).
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Feature} & \textbf{Supported?} \\ 
+\midrule
+DP Gradient Synchronization & \checkmark \\
+DiLoCo Gradient Synchronization & \checkmark \\
+SWARM Stochastic Wiring & \checkmark \\
+SWARM Rewiring & \\
+SWARM Adaptive Rebalancing & \\
+\bottomrule
+\end{tabular}
+\caption{Training Script Feature List}
+\label{tab:features}
+\end{table}
+
 % Hyperparameters
 \subsection{Hyperparameters}
 
 Table~\ref{tab:hyperparameters} shows the hyperparameters used throughout the
 experiments. The outer optimizer parameters is only used for DiLoCo-style
-training, else the gradients are averaged before performing a regular optimizer
-step by default.
+training. For non-DiLoCo runs gradients are averaged before performing a regular
+local optimizer step.
 
 \begin{table}[ht]
 \centering
@@ -933,11 +965,11 @@ step by default.
 & Sequence Length & 1024 \\ 
 & Steps & 2000 \\
 \hline
-\multirow{1}{*}{InnerOptimizer} & Name & AdamW \\ 
+\multirow{1}{*}{Local Optimizer} & Name & AdamW \\ 
 & Weight decay & - \\ 
 & Learning Rate & $4 \times 10^{-4}$ \\ 
 \hline
-\multirow{1}{*}{OuterOptimizer} & Name & Nesterov \\ 
+\multirow{1}{*}{Global Optimizer} & Name & Nesterov \\ 
 & Learning Rate & 0.7 \\ 
 & Momentum & 0.9 \\ 
 \bottomrule
@@ -946,10 +978,5 @@ step by default.
 \label{tab:hyperparameters}
 \end{table}
 
-% Hardware
-\subsection{Hardware}
-
-All experiments were conducted on a single node with eight co-located H100 GPUs
-on \href{https://app.primeintellect.com/}{Prime Intellect Compute}.
 
 \end{document}
