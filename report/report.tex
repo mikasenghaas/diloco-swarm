@@ -752,22 +752,29 @@ for all models from Table~\ref{tab:hyperparameters} and train for 2,000 steps.
 For each size, we also train a single-node baseline with four times smaller
 batch size.
 
-\begin{table}[ht]
-\centering
-\begin{tabular}{lccc}
-\toprule
-\textbf{\# Params} & \textbf{PPL} & \textbf{$\Delta$ (Abs./Rel.)} \\ 
-\midrule
-180M & 30.15 & 7.01 / 18.86\% \\
-400M & 25.66 & 5.91 / 18.72\% \\
-800M & & & \\
-\bottomrule
-\end{tabular}
-\caption{\textbf{Model Size} We report the final validation perplexity for
-different model sizes and their absolute and relative changes compared to a
-single-node baseline with smaller batch size.}
-\label{tab:experiment3}
-\end{table}
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.48\textwidth]{figures/experiment3.pdf}
+  \caption{\textbf{Model Size} We train three different sizes of GPT-2 models and report the validation perplexity throughout training. The performance improvement over the single-node baseline remains constant at around 18\% across all model sizes, suggesting that DiLoCo-style gradient synchronization scales well with increasing model size.}
+  \label{fig:experiment3}
+\end{figure}
+
+% \begin{table}[ht]
+% \centering
+% \begin{tabular}{lccc}
+% \toprule
+% \textbf{\# Params} & \textbf{PPL} & \textbf{$\Delta$ (Abs./Rel.)} \\ 
+% \midrule
+% 180M & 30.15 & 7.01 / 18.86\% \\
+% 400M & 25.66 & 5.91 / 18.72\% \\
+% 800M & & & \\
+% \bottomrule
+% \end{tabular}
+% \caption{\textbf{Model Size} We report the final validation perplexity for
+% different model sizes and their absolute and relative changes compared to a
+% single-node baseline with smaller batch size.}
+% \label{tab:experiment3}
+% \end{table}
 
 Table~\ref{tab:experiment3} shows with DiLoCo we obtain a constant improvement
 of $\sim$18\% over the single-node baseline run, for all tested model sizes.
