@@ -567,17 +567,19 @@ We consider a language modeling task on the FineWeb-Edu~\cite{penedo2024fineweb}
 dataset, a large pre-training dataset consisting of high-quality web pages
 filtered for educational content. We choose this dataset over other common
 pre-training datasets due to its high token efficiency allowing to match the
-original GPT-2 performance on the
-HellaSwag~\cite{zellers2019hellaswag} benchmark when training the same model with 10x
-less data~\cite{karpathy2024nanogpt}.
+original GPT-2 performance on the HellaSwag~\cite{zellers2019hellaswag}
+benchmark when training the same model with 10x less
+data~\cite{karpathy2024nanogpt}.
 
 % Model
-For all experiments, we use the GPT-2 family of models~\cite{radford2019gpt2} which
-are parameterized as shown in Table~\ref{tab:models}. Notice that the parameter 
-counts slightly deviate from the original paper, since we do not share the 
-weights of the embedding matrix and language modeling head to simplify training
-in pipelined settings. Per default, we use GPT-2 Small and always train from 
-randomly initialized models.
+For all experiments, we use the GPT-2 family of models~\cite{radford2019gpt2} in
+varying sizes. We adapt the original architectural hyperparameters to match the
+original GPT-2 paper~\cite{radford2019gpt2}, as shown in Table~\ref{tab:models}.
+Notice that the parameter counts slightly deviate from the original paper, since
+we do not share the weights of the embedding matrix and language modeling head
+to circumvent additional gradient communication in pipelined settings between
+the first and last stage. Per default, we train GPT-2 Small and train from
+scratch.
 
 % Model sizes
 \begin{table}[h]
@@ -586,55 +588,71 @@ randomly initialized models.
 \toprule
 \textbf{Model} & \textbf{Layers} & \textbf{Heads} & \textbf{Hidden Size} & \textbf{Params} \\
 \midrule
+Tiny & 4 & 4 & 128 & $\sim$14M \\
 Small & 12 & 12 & 768 & $\sim$180M \\
 Medium & 24 & 16 & 1024 & $\sim$405M \\
 Large & 36 & 20 & 1280 & $\sim$800M \\
 \bottomrule
 \end{tabular}
 \caption{\textbf{Model Sizes.} GPT-2 model configurations used in experiments.
-Parameter counts account for non-shared weights in embedding and language
+Parameter counts account for non-shared weights of embedding matrix and language
 modeling head.}
 \label{tab:models}
 \end{table}
 
 % Hyper-parameters
 The hyper-parameters are adapted from the tuning done in
-DiLoCo~\cite{douillard2023diloco}: The default optimizer outer
-AdamW~\cite{loshchilov2019adamw} with a learning rate of $4\cdot 10^{-4}$, and a
-weight decay of $0.01$ which is linearly warmed up. When DiLoCo-style gradient
-synchronization applies, we use a Nesterov with a learning rate of $0.7$ and a
-momentum of $0.9$ as an global optimizer. A detailed description of the
-hyperparameters is provided in Table~\ref{tab:hyperparameters} in the Appendix.
+DiLoCo~\cite{douillard2023diloco}: The default local optimizer is
+AdamW~\cite{loshchilov2019adamw} with a linearly warmed up learning rate of
+$4\cdot 10^{-4}$, and a weight decay of $0.01$. When DiLoCo is active, we use a
+Nesterov with a learning rate of $0.7$ and a momentum of $0.9$ as the global
+optimizer. A detailed description of the hyperparameters is provided in
+Table~\ref{tab:hyperparameters} in the Appendix.
 
 % Evaluation
 Our main evaluation metric is the perplexity on a held-out validation set of 10M
 randomly sampled tokens from FineWeb-Edu. We evaluate during and after training
-to show the convergence against the number of training steps.
+to show the convergence against the number of training steps, as well as the
+total communication cost.
 
 % Main Experiment: DiLoCo-SWARM
 \textbf{Main Experiment.} Our main experiment setup closely follows that of
-DiLoCo~\cite{douillard2023diloco}. We train two baselines and a DiLoCo-SWARM. The
-\textit{weak baseline} trains for 2,000 steps on one GPU with a batch size of
-512 and sequence length of 1024, for a total training budget of 1B tokens. The 
-strong baseline is a 4x2 SWARM, i.e. eight workers distributed in two pipeline 
+DiLoCo~\cite{douillard2023diloco}. We train two baselines and a DiLoCo-SWARM.
+The weak baseline trains for 2,000 steps on one GPU with a batch size of 512 and
+sequence length of 1024, for a total data budget of 1B tokens. The strong
+baseline is a 4x2 SWARM, i.e. eight workers distributed evenly into two pipeline
 stages. This baseline performs regular gradient synchronization at every step.
-The higher compute budget is used to scale the batch size to the number of
-worker per stage, leading to a total training budget of 4B tokens. Finally, we
-train a 4x2 DiLoCo-SWARM which uses the same setup and compute budget as the
-strong baseline but performs the outer optimization step only every 50 steps.
+The higher compute budget is used to scale the batch size to the number of nodes
+per stage, leading to a total training budget of 4B tokens. Finally, we train a
+4x2 DiLoCo-SWARM which is identical to the strong baseline but performs outer
+optimization steps every 50 steps.
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.8\textwidth]{figures/experiment1.png}
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/experiment1-1.pdf}
+    \caption{Training Steps}
+    \label{fig:experiment1-1}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/experiment1-2.pdf}
+    \caption{Communication Cost}
+    \label{fig:experiment1-2}
+  \end{subfigure}
   \caption{\textbf{Main Result} We show the validation perplexity against the
-  number of training steps for two baselines and SWARM-DiLoCo. With the same
-  compute and data budget but with 50x less gradient synchronization,
-  DiLoCo-SWARM matches the generalization performance of the strong SWARM
-  baseline.}
+  number of training steps (left) and the total communication cost (right) for
+  two baselines and SWARM-DiLoCo. With the same compute and data budget but with
+  50x less gradient synchronization, DiLoCo-SWARM matches the generalization
+  performance of the strong SWARM baseline. However, the total communication
+  cost is only insignificantly reduced, as the cost is dominated by PP
+  communication for GPT-2 Small.}
   \label{fig:experiment1}
 \end{figure*}
 
-Figure~\ref{fig:experiment1} shows the validation perplexity as a function of
+Figure~\ref{fig:experiment1-1} shows the validation perplexity as a function of
 the training steps. Unsurprisingly, the weaker baseline, using less compute and
 data, is outperformed by the stronger SWARM baseline with final perplexities of 
 37.16 and 30.22, respectively. Our main finding is that DiLoCo-SWARM closely
@@ -643,6 +661,37 @@ with a validation perplexity of 30.15, despite synchronizing gradients 50x fewer
 times. This implies that DiLoCo-style gradient synchronization is compatible
 with SWARM parallelism, allowing to reduce the communication cost incurred by 
 gradient synchronization within pipeline stages of SWARM.
+
+Figure~\ref{fig:experiment1-2} shows the total communication cost for the same
+experiments. Surprisingly, the total communication cost is only moderately
+reduced in DiLoCo-SWARM compared to SWARM. This finding points at a an important
+difference between DiLoCo and DiLoCo-SWARM. In DiLoCo, synchronizing gradients
+every $H$ translates to a directly proportional reduction in communication cost
+by $1/H$. DiLoCo-SWARM, in contrast, interleaves DP and PP communication. Since
+DiLoCo can only reduce DP communication cost, the PP communication stays
+constant.  Hence, we can only hope to reduce the total communication cost as a
+factor of $1/H \cdot \text{DP Communication Cost Fraction}$. Luckily, the
+square-cube law~\cite{ryabinin2023swarm} suggests that the PP communication cost
+scales quadratically while DP communication scales cubically with increasing
+model sizes. Thus, with larger models, DP communication dominates the total
+communication cost. We illustrate this phenomenon in
+Figure~\ref{fig:square-cube-law}, which shows the fraction of the communication
+cost incurred by DP and PP communication for 4x2 SWARMs training increasingily
+large models. In summary, DP communication dominates the total communication
+cost for larger models, and so DiLoCo-SWARM is only able to reduce the
+communication cost by a factor of $1/H$ in the limit of large models.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.45\textwidth]{figures/square-cube-law.pdf}
+  \caption{\textbf{Communication Cost Scaling} We show the communication cost
+  incurred by DP and PP communication for 4x2 SWARMs in our common training
+  setup.  For small models, PP communication dominates the total communication
+  cost. However, for larger models, DP communication dominates the total
+  communication cost.} 
+  \label{fig:square-cube-law}
+\end{figure}
+
 
 % Experiment 2: Ablation on communication frequency
 \textbf{Communication Frequency.} We are interested in how \textit{infrequently}
