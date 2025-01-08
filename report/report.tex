@@ -27,12 +27,12 @@
 % Colors
 \definecolor{bblue}{HTML}{5884E2}
 \definecolor{oorange}{HTML}{F19E38}
+\definecolor{ppurple}{HTML}{9900FF}
 
 % Colored boxes
-\newcommand{\orangebox}{\tcbox[size=minimal,boxrule=0pt,arc=3pt,
-  colback=oorange!50,colframe=oorange!50,left=1pt,right=1pt,top=1pt,bottom=1pt]{\phantom{x}}}
-\newcommand{\bluebox}{\tcbox[size=minimal,boxrule=0pt,arc=3pt,
-  colback=bblue!50,colframe=bblue!50,left=1pt,right=1pt,top=1pt,bottom=1pt]{\phantom{x}}}
+\newcommand{\orangebox}{\colorbox{oorange!50}{\hspace{0.3em}}}
+\newcommand{\bluecircle}{\textcolor{bblue}{\LARGE$\bullet$}}
+\newcommand{\purplecircle}{\textcolor{ppurple}{\LARGE$\bullet$}}
 
 % Code
 \definecolor{codegreen}{rgb}{0,0.6,0}
@@ -211,26 +211,26 @@ parallelization techniques relevant in the context of DiLoCo-SWARM.
 
 \begin{figure}[ht]
     \centering
-    \begin{subfigure}[b]{0.45\textwidth}
+    \begin{subfigure}[b]{0.48\textwidth}
         \centering
+        \vspace{0.5cm}
         \includegraphics[width=\textwidth]{figures/dp.pdf}
-        \caption{Data Parallelism}
+        \caption{\textbf{Data Parallelism.} In DP, nodes synchronize (\bluecircle) local gradients at every step using an \texttt{AllReduce}
+        operation.}
         \label{fig:dp}
     \end{subfigure}
     \hfill
     \begin{subfigure}[b]{0.45\textwidth}
         \centering
+        \vspace{0.5cm}
         \includegraphics[width=\textwidth]{figures/pp.pdf}
-        \caption{PP Parallelism}
+        \caption{\textbf{Pipeline Parallelism.} In PP, nodes communicate
+        activations and gradients (\orangebox) between adjacent stages.}
         \label{fig:pp}
     \end{subfigure}
-    \caption{\textbf{DP and PP Communication} Communication patterns for $n=3$
-    DP and PP groups. Nodes are represented as boxes, communication as links.
-    {\color{bblue} Blue links} represent DP communication, i.e.
-    \texttt{AllReduce} to average gradients between nodes.
-    {\color{oorange}Orange links} represent PP communication, i.e.
-    bi-directional point-to-point communication between nodes in adjacent
-    stages.}
+    \caption{\textbf{DP and PP.} We show communication patterns for $n=2$ DP and
+    PP groups over $T$ training steps. Nodes are represented as boxes,
+    communication as solid lines. Dotted lines indicate no communication.}
 \end{figure}
 
 \textit{Data parallelism} (DP)~\cite{dean2012dp} partitions the dataset,
@@ -295,13 +295,14 @@ communication).
 
 \begin{figure}[ht]
     \centering
+    \vspace{0.5cm}
     \includegraphics[width=0.48\textwidth]{figures/dpp.pdf}
-    \caption{\textbf{DPP.} Communication patterns in 2D
-    (DP+PP) parallelism for $3x3$ nodes. PP and DP communication is interleaved.
-    First, nodes accumulate gradients by forward and backward passes through
-    pipelines in independent PP groups (\mbox{\orangebox}). Then,
-    they average gradients in DP groups (\mbox{\bluebox}) before
-    performing a model update.  }
+    \caption{\textbf{DPP.} We show communication patterns in a 2D grid of
+    $2\times2$ nodes over $T$ training steps. PP and DP communication is
+    interleaved.  First, nodes accumulate gradients by forward and backward
+    passes through pipelines in independent PP groups (\mbox{\orangebox}). Then,
+    they average gradients in DP groups (\mbox{\bluecircle}) before performing a
+    model update.}
     \label{fig:dpp}
 \end{figure}
 
@@ -384,12 +385,12 @@ other tricks for scaling.
 
 \begin{figure}[ht]
     \centering
+    \vspace{0.5cm}
     \includegraphics[width=0.45\textwidth]{figures/diloco.pdf}
-    \caption{\textbf{DiLoCo.} We visualize gradient synchronization points for
-    regular DP and DiLoCo training for $n=3$ nodes training for $N$ steps. In
-    DP, gradients are sychronized every step. In DiLoCo, pseudo-gradients are
-    synchronized every $H=3$ local steps, reducing the total communication
-    cost by a factor of $1/3$.}
+    \caption{\textbf{DiLoCo.} We visualize communication patterns for a $n=2$
+    DiLoCo group over $T$ training steps. Unlike DP, pseudo-gradients are
+    synchronized (\purplecircle) every $H=2$ local steps, reducing the total
+    communication cost by a factor of $1/2$.}
     \label{fig:diloco}
 \end{figure}
 
