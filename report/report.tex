@@ -259,76 +259,53 @@ A key insight of SWARM is the so-called \textit{Square-Cube Law}~\cite{ryabinin2
 
 \section{DiLoCo-SWARM}
 
-SWARM enables large-scale, fault-tolerant DPP training in decentral settings.
-However, one of its two major communication pattern relies on costly
-synchronization of gradients at every step. Meanwhile, DiLoCo has proven a
-robust alternative to step-synchronous gradient synchronization in a variety of
-settings, but, on its own, hits natural memory limitations at larger scale.
+SWARM enables large-scale, fault-tolerant data-pipeline parallel (DPP) training in decentralized settings by dynamically constructing stochastic pipelines. However, its data-parallel component still requires frequent gradient synchronization, resulting in high communication costs. In contrast, DiLoCo~\cite{douillard2023diloco} reduces synchronization frequency through local-global optimization but is limited by memory constraints in large models.
 
-This motivates DiLoCo-SWARM: a decentralized training method combining the best
-of both worlds. It reduces the communication cost incurred by gradient
-synchronization via DiLoCo while preserving the desirable scaling and
-fault-tolerance properties of SWARM. Put simply, it replaces DP groups with
-DiLoCo groups, as visualized in Figure~\ref{fig:diloco-swarm}.
+This motivates \textit{DiLoCo-SWARM}, a decentralized training method that combines the communication efficiency of DiLoCo with the scalability and fault-tolerance of SWARM. By replacing SWARM's data-parallel groups with DiLoCo groups, DiLoCo-SWARM significantly reduces the frequency for costly
+all-to-all gradient synchronization within SWARM stages (Figure~\ref{fig:diloco-swarm}).
 
 \begin{figure}[ht]
     \centering
     \includegraphics[width=0.45\textwidth]{figures/diloco-swarm.pdf}
-    \caption{\textbf{DiLoCo-SWARM.} We visualize the communication patterns of
-    DiLoCo-SWARM for $9$ nodes in $3\times 3$ DiLoCo-SWARM. In comparison to
-    regular SWARM, DiLoCo-SWARM replaces DP groups with DiLoCo groups which
-    synchronize less frequently.}
+    \caption{\textbf{DiLoCo-SWARM.} The communication patterns of DiLoCo-SWARM for $4$ nodes in a $2\times 2$ grid. DiLoCo-SWARM replaces SWARM's frequent gradient synchronization with less frequent DiLoCo-style synchronization.}
     \label{fig:diloco-swarm}
 \end{figure}
 
 \subsection{Algorithm}
 
-Algorithm~\ref{alg:diloco-swarm} describes the algorithmic details of
-DiLoCo-SWARM. We assume a $m\times n$ grid of nodes for simplified notation
-without loss of generality, but note that SWARM, and therefore DiLoCo-SWARM, can
-handle any number of nodes per stage. DiLoCo-SWARM proceeds as follows: At the
-start of an inner optimization loop, each node in a SWARM stage shares the same
-global model shard $\theta_j^{(t-1)}$. Then, SWARM nodes perform $H$ local
-steps. At each local step, nodes compute a local gradient $g_{i,j}$ by
-stochastically forwarding activations and gradients to peers in adjacent stages,
-and update their local model shard $\theta_{i,j}^{(t-1)}$ via a local optimizer
-$\mathtt{OPT}_{L}$. After the inner optimization loop completes, nodes within a
-SWARM stage form DiLoCo groups. They compute a local pseudo-gradient
-$\Delta_{i,j} = \theta_{i,j}^{(t-1)} - \theta_j^{(t-1)}$ and synchronize them to
-update their global model shard $\theta_j^{(t)}$ using the global optimizer
-$\mathtt{OPT}_{G}$.
+Algorithm~\ref{alg:diloco-swarm} describes the algorithmic details of DiLoCo-SWARM. For simplicity, we assume a grid of $m \times n$ nodes, though the method generalizes to any number of nodes per stage. 
 
-Note, that the algorithm description largely follows SWARM for accumulating
-gradients during local steps, and DiLoCo for gradient synchronization.  Also,
-observe that because of stochastic wiring gradients $g_{i,j}$ may depend on
-batches $x_i'$ sampled from different data shards, leading to "mixing" of data
-shards across nodes.
+Each node begins with a copy of the global model shard $\theta_j^{(t-1)}$. During the inner optimization loop, nodes perform $H$ local steps, stochastically forwarding activations and gradients to adjacent stages and updating their local model shard $\theta_{i,j}$ using a local optimizer. After $H$ steps, nodes compute pseudo-gradients $\Delta_{i,j}$ and synchronize within their stage to update the global model shard $\theta_j^{(t)}$ using a global optimizer.
+
+DiLoCo-SWARM combines SWARM's stochastic wiring during local steps with DiLoCo to synchronize within SWARM stages. In doing so, the method reduces the points
+of gradient synchronization, resulting in more communication-efficient training. Unlike DiLoCo, which cuts communication by a factor of $H$, DiLoCo-SWARM cuts communication by a factor of $H$ times the fraction of of total communication cost incurred by gradient synchronization. Our experiment analyze how this affects real-world systems and communication. Furthermore, due to stochastic wiring, gradients may depend on batches sampled from different data shards, resulting in data mixing across nodes.
 
 \begin{algorithm}
 \caption{DiLoCo-SWARM}
 \label{alg:diloco-swarm}
 \begin{algorithmic}[1]
-\State \textbf{Input:} Data shard $D_i$, Model shard $\theta_j$, Loss $\mathcal{L}$, Optimizers $\mathtt{OPT}_{L}$ and $\mathtt{OPT}_{G}$, Num. Local Steps $H$
+\State \textbf{Input:} Data shard $D_i$, Model shard $f^{(j)}$, Global model shard parameters $\theta_{j}^{(t-1)}$, Loss $\mathcal{L}$, Optimizers $\mathtt{OPT}_{L}$ and $\mathtt{OPT}_{G}$, Local Steps $H$
 \Procedure{FwdBwd}{}
   \If{$j = 1$} \Comment{First stage}
     \State Sample batch: $x_i \sim D_i$
-      \State Forward: $a_{i,1} \gets f^{(1)}_{\theta_{i,1}}(x_i)$
-      \State Send forward: $\mathtt{send}(a_{i,1}, 2)$ 
-      \State Receive backward: $g_{i,2} \gets \mathtt{recv}(1)$
-      \State Compute gradient: $g_{i,1} \gets g_{i,2} \cdot \nabla_{\theta_j} f^{(j)}_{\theta_j}(a_{i,j-1})$
+    \State Forward: $a_{ij} \gets f^{(j)}_{\theta_{ij}}(x_i)$
+    \State Send forward: $\mathtt{send}(a_{ij}, j+1)$ 
+    \State Receive backward: $g_{i,j+1} \gets \mathtt{recv}(j+1)$
+    \State Compute gradient: $g_{ij} \gets g_{i,j+1} \cdot \nabla_{\theta_{ij}} f^{(j)}_{\theta_{ij}}(a_{ij})$
   \ElsIf{$j = n$} \Comment{Last stage}
-      \State Receive forward: $a_{i,n-1} \gets \mathtt{recv}(n-1)$
-      \State Compute gradient: $g_{i,n} \gets \nabla_{\theta_n} \mathcal{L}(a_{i,n-1})$
-      \State Send backward: $\mathtt{send}(g_{i,n}, n-1)$
+    \State Receive forward: $a_{i,j-1} \gets \mathtt{recv}(j-1)$
+    \State Forward: $a_{ij} \gets f^{(j)}_{\theta_{ij}}(a_{i,j-1})$
+    \State Compute gradient: $g_{ij} \gets \nabla_{\theta_{ij}} \mathcal{L}(a_{ij})$
+    \State Send backward: $\mathtt{send}(g_{ij}, j-1)$
   \Else \Comment{Intermediate stages}
-      \State Receive forward: $a_{i,j-1} \gets \mathtt{recv}(j-1)$
-      \State Forward: $a_{i,j} \gets f^{(j)}_{\theta_j}(a_{i,j-1})$
-      \State Send forward: $\mathtt{send}(a_{i,j}, j+1)$
-      \State Receive backward: $g_{i,j+1} \gets \mathtt{recv}(j+1)$
-      \State Compute gradient: $g_{i,j} \gets g_{i,j+1} \cdot \nabla_{\theta_j} f^{(j)}_{\theta_j}(a_{i,j-1})$
-      \State Send backward: $\mathtt{send}(g_{i,j}, j-1)$
+    \State Receive forward: $a_{ij-1} \gets \mathtt{recv}(j-1)$
+    \State Forward: $a_{ij} \gets f^{(j)}_{\theta_{ij}}(a_{i,j-1})$
+    \State Send forward: $\mathtt{send}(a_{ij}, j+1)$
+    \State Receive backward: $g_{i,j+1} \gets \mathtt{recv}(j+1)$
+    \State Compute gradient: $g_{ij} \gets g_{i,j+1} \cdot \nabla_{\theta_{ij}} f^{(j)}_{\theta_{ij}}(a_{ij})$
+    \State Send backward: $\mathtt{send}(g_{ij}, j-1)$
   \EndIf
-  \Return $g_{i,j}$
+  \Return $g_{ij}$
 \EndProcedure
 \State Copy global model: $\theta_{ij}^{(t-1)} \gets \theta_j^{(t-1)}$
 \For{$H$ steps}
@@ -336,52 +313,24 @@ shards across nodes.
   \State Update local model: $\theta_{ij}^{(t-1)} \gets \mathtt{OPT}_{L}(\theta_{ij}^{(t-1)}, g_{i,j})$
 \EndFor
 \State Compute pseudo-gradient: $\Delta_{i,j} \gets \theta_{ij}^{(t-1)} - \theta_j^{(t-1)}$
-\State Sync pseudo-gradients: $\Delta_j \gets \frac{1}{m}\sum_j^m \Delta_{i,j}$
+\State Sync pseudo-gradients: $\Delta_j \gets \frac{1}{m}\sum_i^m \Delta_{i,j}$
 \State Update global model: $\theta_j^{(t)} \gets \mathtt{OPT}_{G}(\theta_j^{(t-1)}, \Delta_j)$
 \end{algorithmic}
+\begin{minipage}{\linewidth}
+\vspace{1.5ex}
+\small
+\textbf{Note:} The \texttt{recv} and \texttt{send} functions perform many-to-one and one-to-many communication with adjacent stages using
+stochastic wiring. Details are abstracted away for brevity.
+\end{minipage}
 \end{algorithm}
 
 \subsection{Implementation}
 
-A key contribution of this work is the release of the full experiment codebase
-(\github{}) and a distilled single-file training script (\gist{}) which
-implements all mentioned distributed training methods in one place, i.e. DP, PP,
-DPP, SWARM, with optional DiLoCo-style gradient synchronization. Example
-invocations are shown in the Appendix.
+We release a complete implementation of the proposed method, along with a distilled, single-file training script that supports DP, PP, DPP, SWARM, and DiLoCo-SWARM. The implementation is designed for simplicity, relying solely on PyTorch's \texttt{torch.distributed} package for communication. 
 
-% Advantages (Minimal, PyTorch-only, various algos, HF support)
-The implementation is designed with simplicity and readability in mind. It only
-depends on PyTorch, specifically the \texttt{torch.distributed} package, for
-training and communication. Further, instead of multiple thousand lines of code 
-of the original SWARM implementation, it uses only a few hundred. Put together,
-this makes it easy for anybody to understand various traditional parallelization
-techniques, and how they interact with decentralized variants, like DiLoCo and
-SWARM. To enable quick testing and debugging, it can emulate nodes via threads.
-Finally, it integrates with HuggingFace for models and datasets, allowing
-diverse testing setups. In summary, we hope that the training script will be an
-excellent educational resource, and the full experiment codebase a good starting
-point for quickly verifying and iterating on research ideas, as evidenced by
-DiLoCo-SWARM.
+The training script is minimal, consisting of only a few hundred lines of code, making it an accessible resource for researchers to explore and experiment with various distributed training techniques. It supports emulation of multiple nodes via threading and integrates with HuggingFace for model and dataset loading. 
 
-% Limitations (Not feature-complete and less efficient)
-The simplicity comes at the cost of efficiency and feature-incompleteness. In
-particular, a subset of SWARM features, most notably those enabling
-fault-tolerance, are not yet supported. Some require features beyond what is
-supported in PyTorch today. A full list of not-yet supported features is listed
-in the Appendix. An important consequence of this is that the script currently
-only supports runs on a single node with multiple local workers, and is
-therefore best-suited for research purposes. Finally, the training script does
-not optimize pipeline scheduling, and overlaying computation and communication,
-and so time-to-accuracy comparison between methods are not meaningful.
-
-% NanoGPT
-The implementation should therefore be seen as a supplemental resource other
-open-source implementations of SWARM and DiLoCo, focusing on simplicity and
-hackability. Our hope is that it might trigger similar effects as other
-open-source efforts like NanoGPT~\cite{karpathy2024nanogpt}, a minimal
-re-implementation of GPT-2, which today is the default within the open-source
-community to benchmark architecture, hyper-parameter and optimizer research in
-an open and reproducible manner~\cite{moddednanogpt2024}.
+While the implementation prioritizes readability over efficiency, it provides a foundation for future work on decentralized training systems. Inspired by open-source efforts like NanoGPT~\cite{karpathy2024nanogpt}, we aim to foster further research and experimentation in decentralized learning.
 
 \section{Experiments}
 
