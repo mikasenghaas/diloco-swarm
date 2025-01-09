@@ -95,21 +95,21 @@
 \end{titlepage}
 
 % Title
-% \twocolumn[
-%   \icmltitle{DiLoCo-SWARM}
-%   \begin{icmlauthorlist}
-%     \icmlauthor{Mika Senghaas}{author}
-%     \icmlauthor{Martijn De Vos}{supervisor}
-%     \icmlauthor{Akash Dhasad}{supervisor}
-%     \icmlauthor{Rishi Sharma}{supervisor}
-%   \end{icmlauthorlist}
-%   \icmlaffiliation{author}{Author}
-%   \icmlaffiliation{supervisor}{Supervisor}
-%   \icmlcorrespondingauthor{Mika Senghaas}{mika.senghaas@epfl.ch}
-%   \icmlkeywords{Distributed Training, Decentralized AI, SWARM, DiLoCo}
-%   \vskip 0.3in
-% ]
-% \printAffiliationsAndNotice{}
+\twocolumn[
+  \icmltitle{DiLoCo-SWARM}
+  \begin{icmlauthorlist}
+    \icmlauthor{Mika Senghaas}{author}
+    \icmlauthor{Martijn De Vos}{supervisor}
+    \icmlauthor{Akash Dhasad}{supervisor}
+    \icmlauthor{Rishi Sharma}{supervisor}
+  \end{icmlauthorlist}
+  \icmlaffiliation{author}{Author}
+  \icmlaffiliation{supervisor}{Supervisor}
+  \icmlcorrespondingauthor{Mika Senghaas}{mika.senghaas@epfl.ch}
+  \icmlkeywords{Distributed Training, Decentralized AI, SWARM, DiLoCo}
+  \vskip 0.3in
+]
+\printAffiliationsAndNotice{}
 
 % Abstract
 \begin{abstract}
@@ -122,7 +122,7 @@
 
 \section{Introduction}
 
-Modern foundation models contain billions of parameters and are trained on trillions of tokens~\cite{chowdhery2022palm,brown2023gpt3,dubey2024llama3,google2024gemini}. Achieving this scale necessitates orchestrating thousands of GPUs to distribute computation~\cite{dubey2024llama3,deepseekai2024}. However, conventional parallelization techniques rely heavily on high-bandwidth interconnects to avoid communication bottlenecks. As a result, cutting-edge models are primarily trained in high-performance clusters (HPCs). Operating these clusters incurs significant costs, thereby restricting research abilities to a select group of corporate and state actors~\cite{jaghouar2024intellect1}.
+Modern foundation models contain billions of parameters and are trained on trillions of tokens~\cite{chowdhery2022palm,brown2023gpt3,dubey2024llama3,google2024gemini}. Achieving this scale necessitates orchestrating thousands of GPUs to distribute computation~\cite{dubey2024llama3,deepseekai2024}. However, conventional parallelization techniques rely heavily on high-bandwidth interconnects to avoid communication bottlenecks. As a result, cutting-edge models are primarily trained in high-performance clusters (HPCs). Operating these clusters incurs significant costs, thereby restricting research abilities on foundation models to a select group of corporate and state actors~\cite{jaghouar2024intellect1}.
 
 Decentralized training has emerged as a promising alternative. By leveraging low-cost, globally distributed compute resources, decentralized training promises to democratize access to model development. However, this paradigm shift introduces substantial technical challenges, particularly in accommodating latency and bandwidth limitations in Internet connections, heterogeneous compute environments and dynamic node participation.
 
@@ -136,7 +136,7 @@ This work proposes \textit{DiLoCo-SWARM}, a novel approach that integrates DiLoC
 
 \begin{enumerate}
   \item \textbf{Convergence.} We demonstrate that SWARM parallelism can effectively integrate DiLoCo and achieve comparable validation perplexity to a synchronous SWARM baseline, while requiring significantly 50x fewer gradient updates.
-  \item \textbf{Communication Efficiency.} We show that DiLoCo-SWARM achieves increasing communication savings over SWARM as the model size grows. In smaller models, pipeline communication dominates and limits the impact of our method. However, our approach significantly reduces overall communication costs in larger models, where data parallel communication dominates
+  \item \textbf{Communication Efficiency.} We show that DiLoCo-SWARM achieves increasing communication savings over SWARM as the model size grows.
   \item \textbf{Robustness.} We validate the robustness of DiLoCo-SWARM to synchronization frequency, and model sizes, underlining its robustness at scale.
 \end{enumerate}
 
@@ -194,7 +194,7 @@ Both parallelization techniques may be combined. We will refer to this form of h
     \centering
     \vspace{0.5cm}
     \includegraphics[width=0.48\textwidth]{figures/dpp.pdf}
-    \caption{\textbf{DPP.} Illustration of communication patterns in a hybrid parallelism (DPP) setup with a $2 \times 2$ grid of nodes. PP and DP communication are interleaved: PP groups accumulate local gradients independently. Then, DP groups synchronize gradients before updating the model.}
+    \caption{\textbf{DPP.} Illustration of communication patterns in a hybrid parallelism (DPP) setup with a $2 \times 2$ grid of nodes. PP and DP communication are interleaved: PP groups accumulate local gradients independently (\orangebox). Then, DP groups synchronize gradients before updating the model (\bluecircle).}
     \label{fig:dpp}
 \end{figure}
 
@@ -253,7 +253,7 @@ A key insight of SWARM is the so-called \textit{Square-Cube Law}~\cite{ryabinin2
 \begin{figure}[ht]
     \centering
     \includegraphics[width=0.45\textwidth]{figures/swarm.pdf}
-    \caption{\textbf{SWARM.} Illustration of communication in a $2 \times 2$ SWARM. As in DPP, PP and PP communication is interleaved. Crucially, any node may communicate with any other node in adjacent stages, increasing fault-tolerance and throughput in heterogeneous environments.}
+    \caption{\textbf{SWARM.} Illustration of communication in a $2 \times 2$ SWARM. As in DPP, PP (\orangebox) and DP (\bluecircle) communication is interleaved. Crucially, any node may communicate with any other node in adjacent stages, increasing fault-tolerance and throughput in heterogeneous environments.}
     \label{fig:swarm}
 \end{figure}
 
@@ -261,13 +261,13 @@ A key insight of SWARM is the so-called \textit{Square-Cube Law}~\cite{ryabinin2
 
 SWARM enables large-scale, fault-tolerant data-pipeline parallel (DPP) training in decentralized settings by dynamically constructing stochastic pipelines. However, its data-parallel component still requires frequent gradient synchronization, resulting in high communication costs. In contrast, DiLoCo~\cite{douillard2023diloco} reduces synchronization frequency through local-global optimization but is limited by memory constraints in large models.
 
-This motivates \textit{DiLoCo-SWARM}, a decentralized training method that combines the communication efficiency of DiLoCo with the scalability and fault-tolerance of SWARM. By replacing SWARM's data-parallel groups with DiLoCo groups, DiLoCo-SWARM significantly reduces the frequency for costly
+This motivates \textit{DiLoCo-SWARM}, a decentralized training method that combines the communication efficiency of DiLoCo with the scalability and fault-tolerance of SWARM. By replacing SWARM's data-parallel groups with DiLoCo groups, DiLoCo-SWARM significantly reduces the frequency of costly
 all-to-all gradient synchronization within SWARM stages (Figure~\ref{fig:diloco-swarm}).
 
 \begin{figure}[ht]
     \centering
     \includegraphics[width=0.45\textwidth]{figures/diloco-swarm.pdf}
-    \caption{\textbf{DiLoCo-SWARM.} The communication patterns of DiLoCo-SWARM for $4$ nodes in a $2\times 2$ grid. DiLoCo-SWARM replaces SWARM's frequent gradient synchronization with less frequent DiLoCo-style synchronization.}
+    \caption{\textbf{DiLoCo-SWARM.} The communication patterns of DiLoCo-SWARM for $4$ nodes in a $2\times 2$ grid. DiLoCo-SWARM replaces SWARM's frequent gradient synchronization with less frequent DiLoCo-style synchronization of pseudo-gradients (\purplecircle).}
     \label{fig:diloco-swarm}
 \end{figure}
 
@@ -278,7 +278,7 @@ Algorithm~\ref{alg:diloco-swarm} describes the algorithmic details of DiLoCo-SWA
 Each node begins with a copy of the global model shard $\theta_j^{(t-1)}$. During the inner optimization loop, nodes perform $H$ local steps, stochastically forwarding activations and gradients to adjacent stages and updating their local model shard $\theta_{i,j}$ using a local optimizer. After $H$ steps, nodes compute pseudo-gradients $\Delta_{i,j}$ and synchronize within their stage to update the global model shard $\theta_j^{(t)}$ using a global optimizer.
 
 DiLoCo-SWARM combines SWARM's stochastic wiring during local steps with DiLoCo to synchronize within SWARM stages. In doing so, the method reduces the points
-of gradient synchronization, resulting in more communication-efficient training. Unlike DiLoCo, which cuts communication by a factor of $H$, DiLoCo-SWARM cuts communication by a factor of $H$ times the fraction of of total communication cost incurred by gradient synchronization. Our experiment analyze how this affects real-world systems and communication. Furthermore, due to stochastic wiring, gradients may depend on batches sampled from different data shards, resulting in data mixing across nodes.
+of gradient synchronization, resulting in more communication-efficient training. Unlike DiLoCo, which cuts communication by a factor of $H$, DiLoCo-SWARM cuts communication by a factor of $H$ times the fraction of the total communication cost incurred by gradient synchronization. Furthermore, due to stochastic wiring, gradients may depend on batches sampled from different data shards, resulting in data mixing across nodes.
 
 \begin{algorithm}
 \caption{DiLoCo-SWARM}
@@ -334,31 +334,22 @@ While the implementation prioritizes readability over efficiency, it provides a 
 
 \section{Experiments}
 
-% Introduction
-In this section we report the experiment setup and results validating
-DiLoCo-SWARM. The setup and hyperparameters largely follow the
-DiLoCo~\cite{douillard2023diloco} experiments.
+In this section, we validate the effectiveness of DiLoCo-SWARM through a series of experiments on a language modeling task. Our experiments evaluate the impact of DiLoCo-style gradient synchronization within SWARM on convergence, communication cost, and scalability across model sizes. The setup largely follows the experimental protocol of DiLoCo~\cite{douillard2023diloco}, with adaptations for the SWARM framework.
 
-% Dataset
-We consider a language modeling task on the FineWeb-Edu~\cite{penedo2024fineweb}
-dataset, a large pre-training dataset consisting of high-quality web pages
-filtered for educational content. We choose this dataset over other common
-pre-training datasets due to its high token efficiency allowing to match the
-original GPT-2 performance on the HellaSwag~\cite{zellers2019hellaswag}
-benchmark when training the same model with 10x less
-data~\cite{karpathy2024nanogpt}.
+\subsection{Setup}
 
-% Model
-For all experiments, we use the GPT-2 family of models~\cite{radford2019gpt2} in
-varying sizes. We adapt the original architectural hyperparameters to match the
-original GPT-2 paper~\cite{radford2019gpt2}, as shown in Table~\ref{tab:models}.
-Notice that the parameter counts slightly deviate from the original paper, since
-we do not share the weights of the embedding matrix and language modeling head
-to circumvent additional gradient communication in pipelined settings between
-the first and last stage. Per default, we train GPT-2 Small and train from
-scratch.
+We use the FineWeb-Edu dataset~\cite{penedo2024fineweb}, a large pre-training corpus of educational web content, for all experiments. FineWeb-Edu is chosen for its high token efficiency, allowing models to achieve strong performance on downstream benchmarks such as HellaSwag~\cite{zellers2019hellaswag} with significantly less data~\cite{karpathy2024nanogpt}.
 
-% Model sizes
+We train various sizes of GPT-2 models~\cite{radford2019gpt2}, following the original architecture hyperparameters, as summarized in Table~\ref{tab:models}. To avoid additional gradient communication in pipelined settings, we do not share the weights of the embedding matrix and language modeling head. Unless otherwise stated, we train GPT-2 Small from scratch.
+
+Hyper-parameters are adapted from the tuning done in DiLoCo (Douillard et al., 2023): The default local optimizer is AdamW~\cite{loshchilov2019adamw} with a linearly warmed up learning rate of $4\cdot10^{-4}$, and a weight decay of $0.01$. When DiLoCo is active, we use a Nesterov
+with a learning rate of $0.7$ and a momentum of $0.9$ as the global optimizer. A detailed description of the hyperparameters is provided in Table~\ref{tab:hyperparameters} in the Appendix.
+
+Our main evaluation metric is the validation perplexity on a held-out set of 10M tokens from FineWeb-Edu. We evaluate during and after training to show the convergence against the number of training steps, as well as the total communication cost.
+
+All experiments were conducted on a single node with eight co-located H100 GPUs
+on \href{https://app.primeintellect.com/}{Prime Intellect Compute}.
+
 \begin{table}[h]
 \centering
 \begin{tabular}{lcccc}
@@ -371,92 +362,40 @@ Medium & 24 & 16 & 1024 & $\sim$405M \\
 Large & 36 & 20 & 1280 & $\sim$800M \\
 \bottomrule
 \end{tabular}
-\caption{\textbf{Model Sizes.} GPT-2 model configurations used in experiments.
-Parameter counts account for non-shared weights of embedding matrix and language
-modeling head.}
+\caption{\textbf{Model Sizes.} GPT-2 configurations used in experiments. Parameter counts reflect non-shared embedding and head weights.}
 \label{tab:models}
 \end{table}
 
-% Hyper-parameters
-The hyper-parameters are adapted from the tuning done in
-DiLoCo~\cite{douillard2023diloco}: The default local optimizer is
-AdamW~\cite{loshchilov2019adamw} with a linearly warmed up learning rate of
-$4\cdot 10^{-4}$, and a weight decay of $0.01$. When DiLoCo is active, we use a
-Nesterov with a learning rate of $0.7$ and a momentum of $0.9$ as the global
-optimizer. A detailed description of the hyperparameters is provided in
-Table~\ref{tab:hyperparameters} in the Appendix.
+\subsection{Main Experiment: DiLoCo-SWARM}
 
-% Evaluation
-Our main evaluation metric is the perplexity on a held-out validation set of 10M
-randomly sampled tokens from FineWeb-Edu. We evaluate during and after training
-to show the convergence against the number of training steps, as well as the
-total communication cost.
-
-% Main Experiment: DiLoCo-SWARM
-\textbf{Main Experiment.} Our main experiment setup closely follows that of
-DiLoCo~\cite{douillard2023diloco}. We train two baselines and a DiLoCo-SWARM.
-The weak baseline trains for 2,000 steps on one GPU with a batch size of 512 and
-sequence length of 1024, for a total data budget of 1B tokens. The strong
-baseline is a 4x2 SWARM, i.e. eight workers distributed evenly into two pipeline
-stages. This baseline performs regular gradient synchronization at every step.
-The higher compute budget is used to scale the batch size to the number of nodes
-per stage, leading to a total training budget of 4B tokens. Finally, we train a
-4x2 DiLoCo-SWARM which is identical to the strong baseline but performs outer
-optimization steps every 50 steps.
+Our main experiment compares DiLoCo-SWARM to two baselines: a single-node setup and a standard SWARM configuration. The weak baseline trains on a single GPU for 2,000 steps, with a batch size of 512 and a sequence length of 1,024, resulting in a data budget of 1B tokens. The strong baseline is a 4x2 SWARM setup (eight workers distributed across two pipeline stages), which performs step-synchronous gradient synchronization. DiLoCo-SWARM follows the same 4x2 setup but replaces step-synchronous gradient synchronization with DiLoCo-style synchronization every 50 steps. This reduces the communication cost within data-parallel groups by a factor of 50.
 
 \begin{figure*}[t]
   \centering
   \begin{subfigure}[b]{0.48\textwidth}
     \centering
     \includegraphics[width=\textwidth]{figures/experiment1-1.pdf}
-    \caption{Training Steps}
+    \caption{Validation perplexity vs. training steps.}
     \label{fig:experiment1-1}
   \end{subfigure}
   \hfill
   \begin{subfigure}[b]{0.48\textwidth}
     \centering
     \includegraphics[width=\textwidth]{figures/experiment1-2.pdf}
-    \caption{Communication Cost}
+    \caption{Validation perplexity vs. communication cost.}
     \label{fig:experiment1-2}
   \end{subfigure}
-  \caption{\textbf{Main Result} We show the validation perplexity against the
-  number of training steps (left) and the total communication cost (right) for
-  two baselines and SWARM-DiLoCo. With the same compute and data budget but with
-  50x less gradient synchronization, DiLoCo-SWARM matches the generalization
-  performance of the strong SWARM baseline. However, the total communication
-  cost is only insignificantly reduced, as the cost is dominated by PP
-  communication for GPT-2 Small.}
+  \caption{\textbf{Main Result.} DiLoCo-SWARM matches the strong baseline in generalization performance, achieving a final validation perplexity of 30.15. Despite synchronizing gradients 50x fewer times, DiLoCo-SWARM incurs only a moderate reduction in total communication cost due to the dominance of pipeline communication in small models.}
   \label{fig:experiment1}
 \end{figure*}
 
-Figure~\ref{fig:experiment1-1} shows the validation perplexity as a function of
-the training steps. Unsurprisingly, the weaker baseline, using less compute and
-data, is outperformed by the stronger SWARM baseline with final perplexities of 
-37.16 and 30.22, respectively. Our main finding is that DiLoCo-SWARM closely
-matches, and even exceeds, the strong baseline in generalization performance
-with a validation perplexity of 30.15, despite synchronizing gradients 50x fewer
-times. This implies that DiLoCo-style gradient synchronization is compatible
-with SWARM parallelism, allowing to reduce the communication cost incurred by 
-gradient synchronization within pipeline stages of SWARM.
+
+Figure~\ref{fig:experiment1-1} shows that DiLoCo-SWARM closely matches the strong SWARM baseline, with a final validation perplexity of 30.15 compared to 30.22. This confirms that infrequent gradient synchronization does not negatively impact convergence.
 
 Figure~\ref{fig:experiment1-2} shows the total communication cost for the same
-experiments. Surprisingly, the total communication cost is only moderately
-reduced in DiLoCo-SWARM compared to SWARM. This finding points at a an important
-difference between DiLoCo and DiLoCo-SWARM. In DiLoCo, synchronizing gradients
-every $H$ translates to a directly proportional reduction in communication cost
-by $1/H$. DiLoCo-SWARM, in contrast, interleaves DP and PP communication. Since
-DiLoCo can only reduce DP communication cost, the PP communication stays
-constant.  Hence, we can only hope to reduce the total communication cost as a
-factor of $1/H \cdot \text{DP Communication Cost Fraction}$. Luckily, the
-square-cube law~\cite{ryabinin2023swarm} suggests that the PP communication cost
-scales quadratically while DP communication scales cubically with increasing
-model sizes. Thus, with larger models, DP communication dominates the total
-communication cost. We illustrate this phenomenon in
-Figure~\ref{fig:square-cube-law}, which shows the fraction of the communication
-cost incurred by DP and PP communication for 4x2 SWARMs training increasingily
-large models. In summary, DP communication dominates the total communication
-cost for larger models, and so DiLoCo-SWARM is only able to reduce the
-communication cost by $1/H$ in the limit of large models.
+experiments. Surprisingly, the total communication cost is only moderately reduced in DiLoCo-SWARM compared to SWARM. This finding points at a an important difference between DiLoCo and DiLoCo-SWARM. In DiLoCo, synchronizing gradients every $H$ translates to a proportional reduction in communication cost. DiLoCo-SWARM, in contrast, interleaves DP and PP communication. Since
+DiLoCo can only reduce DP communication cost, PP communication cost remains
+constant. Figure~\ref{fig:communication-cost-scaling} shows the fraction of the communication cost for 4x2 SWARM training increasingly large models. It illustrates that DP communication cost scales faster and dominates the total communication cost for larger models. This finding suggests that DiLoCo-SWARM is more effective in reducing the communication cost for larger models.
 
 \begin{figure}[ht]
   \centering
@@ -464,172 +403,72 @@ communication cost by $1/H$ in the limit of large models.
   \caption{\textbf{Communication Cost Scaling} We show the (log) communication
   cost incurred by DP and PP communication for 4x2 SWARMs in the common training
   setup. Because of the square-cube law, PP communication dominates the total communication for smaller models, but DP communication dominates for larger models.} 
-  \label{fig:square-cube-law}
+  \label{fig:communication-cost-scaling}
 \end{figure}
 
-% Experiment 2: Ablation on communication frequency
-\textbf{Communication Frequency.} We are interested in how \textit{infrequently}
-gradient synchronization can occur within SWARM pipeline stages without
-impacting convergence. Intuitively, the slower the frequency, the worse
-convergence, but whether synchronizing every 10 or 200 steps negatively impacts
-performance, has implications on the practical usefulness of the algorithm. To
-investigate, we train five models using the same training setup and only vary
-the number of local training steps before performing synchronizing gradients.
+\subsection{Communication Frequency Ablation}
 
-% TODO: Add perplexities in legend
-% \begin{figure}[ht]
-%   \centering
-%   \includegraphics[width=0.45\textwidth]{figures/experiment3.png}
-%   \caption{\textbf{Communication Frequency} We vary the number of local training
-%   steps before performing an outer optimization step from $\{10, 20, 50, 100, 200\}$ 
-%   and report the validation perplexity throughout training. Synchronizing more
-%   frequently yields better results but performance degradation is neglibible even
-%   on all tested values.}
-%   \label{fig:experiment2}
-% \end{figure}
+We investigate the impact of varying the synchronization frequency within pipeline stages on convergence. Specifically, we train five models with synchronization intervals of $\{10, 20, 50, 100, 200\}$ steps, using the same setup as the main experiment.
 
-Table~\ref{tab:experiment2} shows the results of this experiment. In line with
-the original DiLoCo results, generalization performance monotonically increases
-with higher gradient synchronization frequency. However, the performance
-degradation for less frequent gradient synchronization is mild. Synchronizing
-every 10 steps achieves the best performance, with a validation perplexity of
-27.95. Note, that this also significantly out-performs the SWARM baseline in
-Figure~\ref{fig:experiment1} while still reducing the synchronization frequency
-by 10x. In our experiments, a good trade-off between communication frequency and
-performance is achieved when synchronizing every 50 steps, which is therefore
-used throughout all other experiments.
+Table~\ref{tab:experiment2} shows that generalization performance improves with more frequent synchronization. Synchronizing every 10 steps achieves the best validation perplexity of 27.95 but the performance degrades only mildly when decreasing the frequency. A good trade-off between communication efficiency and performance is observed at 50 steps for our training setup. It is worth noting that this is more frequent compared to the 500 steps reported in DiLoCo. We attribute this difference to a significantly larger number of training steps in DiLoCo's setup, allowing for less frequent synchronization. We believe that with more training steps, a similar frequency can be achieved with DiLoCo-SWARM.
 
 \begin{table}[ht]
 \centering
-\begin{tabular}{lccc}
+\begin{tabular}{lcc}
 \toprule
-\textbf{Freq.} & \textbf{Val. PPL} & \textbf{$\Delta$ (Abs./Rel.)} \\ 
+\textbf{Freq. (steps)} & \textbf{Val. PPL} & \textbf{$\Delta$ (Abs./Rel.)} \\ 
 \midrule
 10 & 27.95 & - \\
-20 & 28.61 & 0.66 / 2.36\% \\
-50 & 30.15 & 2.2 / 7.87\% \\
-100 & 30.49 & 2.54 / 9.09\% \\
-200 & 31.27 & 3.32 / 11.88\% \\
+20 & 28.61 & +0.66 / +2.36\% \\
+50 & 30.15 & +2.20 / +7.87\% \\
+100 & 30.49 & +2.54 / +9.09\% \\
+200 & 31.27 & +3.32 / +11.88\% \\
 \bottomrule
 \end{tabular}
-\caption{\textbf{Communication Frequency} We report the final validation
-perplexity for different communication frequencies and their absolute and
-relative changes compared to synchronizing every 10 steps.}
+\caption{\textbf{Communication Frequency Ablation.} Validation perplexity at different synchronization intervals.}
 \label{tab:experiment2}
 \end{table}
 
-% Experiment 3: Varying the model size
-\textbf{Model Sizes.} Finally, we train three sizes of GPT-2 models, as 
-described in Table~\ref{tab:models} to assess whether DiLoCo-style gradient
-synchronization is robust scaling the model. We use the same hyper-parameters
-for all models from Table~\ref{tab:hyperparameters} and train for 2,000 steps.
-For each size, we also train a single-node baseline with four times smaller
-batch size.
+\subsection{Model Size Ablation}
+
+Finally, we assess the scalability of DiLoCo-SWARM by training four GPT-2 model sizes (Tiny, Small, Medium, and Large) under the same conditions. Figure~\ref{fig:experiment3} shows that DiLoCo-SWARM consistently improves validation perplexity by approximately 18\% over the single-node baseline across all tested model sizes. One noticable outlier is the largest model, which exceeds the single GPU baseline later. We attribute this to untuned hyperparameters, and hypothesize that similar results could be obtained with more tuning. Overall, we conclude that DiLoCo-style gradient synchronization scales effectively with increasing model size.
 
 \begin{figure}[ht]
   \centering
   \includegraphics[width=0.48\textwidth]{figures/experiment3.pdf}
-  \caption{\textbf{Model Size} We train three different sizes of GPT-2 models and report the validation perplexity throughout training. The performance improvement over the single-node baseline remains constant at around 18\% across all model sizes, suggesting that DiLoCo-style gradient synchronization scales well with increasing model size.}
+  \caption{\textbf{Scalability with Model Size.} DiLoCo-SWARM improves
+  generalization performance over the single-node baseline across different
+  GPT-2 model sizes.}
   \label{fig:experiment3}
 \end{figure}
 
-% \begin{table}[ht]
-% \centering
-% \begin{tabular}{lccc}
-% \toprule
-% \textbf{\# Params} & \textbf{PPL} & \textbf{$\Delta$ (Abs./Rel.)} \\ 
-% \midrule
-% 180M & 30.15 & 7.01 / 18.86\% \\
-% 400M & 25.66 & 5.91 / 18.72\% \\
-% 800M & & & \\
-% \bottomrule
-% \end{tabular}
-% \caption{\textbf{Model Size} We report the final validation perplexity for
-% different model sizes and their absolute and relative changes compared to a
-% single-node baseline with smaller batch size.}
-% \label{tab:experiment3}
-% \end{table}
-
-Figure~\ref{fig:experiment3} shows with DiLoCo we obtain a constant improvement
-of $\sim$18\% over the single-node baseline run, for all tested model sizes.
-This finding suggests that gradient synchronization with DiLoCo scales to larger
-models sizes. Especially in the light of the square-cube law, the scaling
-property of DiLoCo is crucial to be viable to train large models using
-DiLoCo-SWARM.
-
 \section{Conclusion}
 
-The results of this study suggest that DiLoCo-style gradient synchronization is
-compatible with SWARM parallelism. This implies that gradient 
-synchronization via a dual optimization scheme is an effective tool for gradient
-synchronization, even when the gradients correspond to model shards in pipeline
-stages accumulated via stochastic forward and backward passes.
+In this work, we introduced DiLoCo-SWARM, a decentralized training method that combines the communication efficiency of gradient synchronization of DiLoCo with the scalability and fault-tolerance of SWARM parallelism. By combining both methods, DiLoCo-SWARM reduces communication costs without compromising convergence performance.
 
-The findings have implications both for the SWARM and DiLoCo community. For
-SWARM, this means that the communication cost incurred by gradient
-synchronization within pipeline stages can be drastically reduced. Hence, future
-research and open-source efforts should focus on integrating DiLoCo-style 
-gradient synchronization into production implementations of SWARM. For DiLoCo,
-the findings further underline the robustness of the method, suggesting that
-DiLoCo is a good candidate as a drop-in replacement anytime gradients need to be
-synchronized between nodes in distributed settings.
+Our experimental results on language modeling tasks using the GPT-2 family of models demonstrate that DiLoCo-SWARM matches the generalization performance of traditional SWARM while reducing gradient synchronization frequency by up to 50x. The method shows stronger communication savings for larger models, where data-parallel communication becomes the dominant cost. These findings suggest that DiLoCo-style synchronization is compatible with SWARM and can be a practical solution for scaling decentralized training to larger models.
 
 \section{Future Work}
 
-% No tuning
-This work assumed that hyperparameters found in
-DiLoCo~\cite{douillard2023diloco} apply directly to DiLoCo-SWARM. While it is
-likely that the hyperparameter provide a good starting point, it is perceivable
-that a slightly different set of hyperparameters might yield better results in
-the training setup of this work due to differences in the dataset, model and
-training algorithm. An immediate continuation of this work would therefore be to
-conduct a thorough hyper-parameter sweeps DiLoCo-SWARM and the considered
-baselines, focusing on ones that are most relevant to convergence properties of 
-the training, i.e. batch size, inner and outer learning rate and learning rate
-schedule. It is to be noted that finding the right trade-off for the compute
-budget is not always easy: Ideally, we would like to train for as long as
-possible to obtain the most robust set of hyperparameters, but this is feasible
-when models when training on huge scale. Hence, hyper-parameter tuning has to be
-conducted on smaller scale and then be extrapolated to larger scales.
+While this work demonstrates the feasibility of DiLoCo-SWARM, several limitations remain, suggesting directions for future research.
 
-% Scale
-By today's standards, the GPT-2 family of models is small. Still, training on
-less than 10B tokens means that models are still in the early stage of training.
-The perplexities are still decreasing, and so the results are not yet
-representative of the full training performance. For example, in the original
-DiLoCo and SWARM experiments were conducted on a data budget of roughly 50B
-tokens per run, resulting in multiple GPU days worth of compute. While the
-results are still indicative of the efficacy of the algorithm, future work
-should simply let the models train for longer to obtain more robust results.
+\subsection{Hyperparameter Tuning}
 
-% Environment
-Finally, all experiments were conducted on co-located GPUs with reliable and fast
-interconnectivity. The initial premise of this research, however, was the
-decentralized setting with unreliable, heterogeneous and poorly connected
-compute resources. SWARM is only favourable over traditional parallelization
-techniques in this setting, and so while the experiments in this study suggest
-that DiLoCo-style gradient synchronization can be used in SWARM, it remains to
-show how the method behaves in a truly decentral setting when scaled to larger
-models, requiring more pipeline stages and nodes per stage.
+Our experiments assumed that the hyperparameters from DiLoCo~\cite{douillard2023diloco} directly apply to DiLoCo-SWARM. While these hyperparameters provide a reasonable starting point, they may not be optimal for the different dataset, model architecture, and training setup used in this work. Future research should include a thorough hyperparameter sweep, focusing on key parameters such as batch size, learning rates, and learning rate schedules. Given the compute budget constraints, hyperparameter tuning should first be conducted on smaller models and then extrapolated to larger scales.
 
-% Efficiency
-All of the above point to more more scale and compute. A crucial step is to
-integrate optimized implementations of DiLoCo and SWARM, including efficient
-pipeline scheduling techniques, allowing for fault-tolerant training over-the-
-internet. Only then experiments can be conducted on truly larger scale and in a
-realistic environment.
+\subsection{Training Duration}
 
-% SWARM architecture
-Finally, another interesting, but open, research question is how the
-DiLoCo-SWARM behaves when varying the number of workers per stage, which is not
-discussed in this work but has implications for the scalability of the method.
+The experiments in this work were conducted on the GPT-2 family of models, which are small by today's standards. Additionally, models were trained on less than 10 billion tokens, meaning they were still in the early stages of training. In contrast, prior DiLoCo and SWARM experiments trained models on over 50 billion tokens, requiring multiple days of GPU time. To obtain more robust results on late-stage training performance, future experiments should consider increasing the data budget and training duration.
+
+\subsection{Decentralized Setting}
+
+All experiments were conducted on co-located GPUs with fast and reliable interconnectivity. However, one of the primary motivators for SWARM is to enable decentralized training across heterogeneous and unreliable hardware with slower network connections. While our findings suggest that DiLoCo-style gradient synchronization is compatible with SWARM, they remain to be validated in a truly decentralized setting with more pipeline stages and nodes per stage. Future work should explore DiLoCo-SWARM in real-world decentralized environments. This likely requires further optimizing the implementation of both DiLoCo-SWARM, specifically SWARM's fault-tolerant communication mechanisms. These optimizations are necessary to conduct experiments at larger scales to harvest the full benefits of DiLoCo-SWARM.
 
 \section*{Acknowledgements}
 \label{sec:acknowledgements}
 
 This work was developed in collaboration with the Scalable Computing Systems
-(SaCS) lab at EPFL as well as Prime Intellect. All compute was kindly sponsored
-by Prime Intellect.
+(SaCS) lab at EPFL and Prime Intellect. I want to thank Martijn, Akash and Rishi from the SaCS lab for the fruitful discussions in our weekly meetings, as well as useful feedback during the writing of this paper. Further, I thank the whole Prime Intellect research team, in particular Sami and Johannes, for their constant support, and for providing the compute infrastructure for the experiments.
 
 % Bibliography
 \bibliography{references}
@@ -641,12 +480,6 @@ by Prime Intellect.
 \onecolumn
 
 \section{Appendix}
-
-% Hardware
-\subsection{Hardware}
-
-All experiments were conducted on a single node with eight co-located H100 GPUs
-on \href{https://app.primeintellect.com/}{Prime Intellect Compute}.
 
 \subsection{Training Script Invocations}
 
@@ -698,32 +531,32 @@ torchrun --nproc_per_node 4 src/train.py --swarm.num_stages 2 \
     --data @configs/data/fineweb-edu-10bt.toml
 \end{lstlisting}
 
-\subsection{Training Script Feature List}
-
-Table~\ref{tab:features} shows some of the key features supported by the
-training script, and features that are not yet supported. The fault tolerance
-mechanisms in SWARM, re-wiring and adaptive rebalancing, are difficult to
-implement in \texttt{torch.dist} as it does not support dynamic world sizes.
-Note that Single-Node training and DP, PP, DPP training are all feature subsets
-of SWARM stochastic wiring and so the script can be used to train using these
-algorithms simply by setting the appropriate parameters (see above).
-
-\begin{table}[ht]
-\centering
-\begin{tabular}{lc}
-\toprule
-\textbf{Feature} & \textbf{Supported?} \\ 
-\midrule
-DP Gradient Synchronization & \checkmark \\
-DiLoCo Gradient Synchronization & \checkmark \\
-SWARM Stochastic Wiring & \checkmark \\
-SWARM Rewiring & \\
-SWARM Adaptive Rebalancing & \\
-\bottomrule
-\end{tabular}
-\caption{Training Script Feature List}
-\label{tab:features}
-\end{table}
+% \subsection{Training Script Feature List}
+% 
+% Table~\ref{tab:features} shows some of the key features supported by the
+% training script, and features that are not yet supported. The fault tolerance
+% mechanisms in SWARM, re-wiring and adaptive rebalancing, are difficult to
+% implement in \texttt{torch.dist} as it does not support dynamic world sizes.
+% Note that Single-Node training and DP, PP, DPP training are all feature subsets
+% of SWARM stochastic wiring and so the script can be used to train using these
+% algorithms simply by setting the appropriate parameters (see above).
+% 
+% \begin{table}[ht]
+% \centering
+% \begin{tabular}{lc}
+% \toprule
+% \textbf{Feature} & \textbf{Supported?} \\ 
+% \midrule
+% DP Gradient Synchronization & \checkmark \\
+% DiLoCo Gradient Synchronization & \checkmark \\
+% SWARM Stochastic Wiring & \checkmark \\
+% SWARM Rewiring & \\
+% SWARM Adaptive Rebalancing & \\
+% \bottomrule
+% \end{tabular}
+% \caption{Training Script Feature List}
+% \label{tab:features}
+% \end{table}
 
 % Hyperparameters
 \subsection{Hyperparameters}
