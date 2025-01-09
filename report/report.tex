@@ -146,11 +146,7 @@ We open-source the experiment code and results on \github{} and \wandb{}, along 
 
 \subsection{Distributed Training}
 
-In distributed training, $n$ nodes collaboratively train a \textit{model}
-$f_{\theta}$ parameterized by weights $\theta$, on a \textit{dataset} of samples
-$D = \{(\mathbf{x}_1, \mathbf{y}_1),\dots\}$. Collaboration requires nodes to
-periodically communicate intermediate results. We will describe two popular
-parallelization techniques relevant in the context of DiLoCo-SWARM.
+In distributed training, $n$ nodes collaboratively train a \textit{model} $f_{\theta}$ parameterized by weights $\theta$, on a \textit{dataset} of samples $D = \{(\mathbf{x}_1, \mathbf{y}_1),\dots\}$. This collaboration requires periodic communication of intermediate results between nodes. We will describe two fundamental parallelization techniques relevant to DiLoCo-SWARM.
 
 \begin{figure}[ht]
     \centering
@@ -158,8 +154,7 @@ parallelization techniques relevant in the context of DiLoCo-SWARM.
         \centering
         \vspace{0.5cm}
         \includegraphics[width=\textwidth]{figures/dp.pdf}
-        \caption{\textbf{Data Parallelism.} In DP, nodes synchronize (\bluecircle) local gradients at every step using an \texttt{AllReduce}
-        operation.}
+        \caption{\textbf{DP Communication}. Nodes synchronize gradients (\bluecircle) at each step within a DP group.}
         \label{fig:dp}
     \end{subfigure}
     \hfill
@@ -167,26 +162,13 @@ parallelization techniques relevant in the context of DiLoCo-SWARM.
         \centering
         \vspace{0.5cm}
         \includegraphics[width=\textwidth]{figures/pp.pdf}
-        \caption{\textbf{Pipeline Parallelism.} In PP, nodes communicate
-        activations and gradients (\orangebox) between adjacent stages.}
+        \caption{\textbf{PP Communication}. Nodes communicate activations and gradients (\orangebox) between adjacent stages within a PP group.}
         \label{fig:pp}
     \end{subfigure}
-    \caption{\textbf{DP and PP.} We show communication patterns for $n=2$ DP and
-    PP groups over $T$ training steps. Nodes are represented as boxes,
-    communication as solid lines. Dotted lines indicate no communication.}
+    \caption{\textbf{DP and PP.} Illustration of communication patterns for $n=2$ DP and PP groups over $T$ training steps. Nodes are represented as boxes, and communication as solid lines. The dotted lines indicate no communication.}
 \end{figure}
 
-\textit{Data parallelism} (DP)~\cite{dean2012dp} partitions the dataset,
-creating $n$ data shards $D_1,\dots,D_n$. The $i$-th node holds a local data
-shard $D_i$ and a copy of the full model parameters $\theta$. Training proceeds
-as shown in Algorithm~\ref{alg:dp}: First, each node samples a batch from its
-data shard and computes local gradients via a full forward and backward pass.
-Next, all nodes average their local gradients into an identical global gradient
-and perform the same model update. The all-to-all communication, as visualized
-in Figure~\ref{fig:dp}, is typically enabled by an
-\texttt{AllReduce}~\cite{walker1995mpi} operation.
-
-% DP communication becomes costlier as the number of model parameters and nodes increases.
+In \textit{Data Parallelism} (DP)~\cite{dean2012dp}, the dataset is partitioned into $n$ shards, with each node holding a unique shard $D_i$ and a complete model replica $\theta$. Training proceeds as follows: Each node samples a batch from its local data shard, and computes local gradients through a forward and backward pass. Before updating the model, nodes synchronize gradients to ensure identical updates across all nodes (Algorithm~\ref{alg:dp}). Typically, the synchronization is performed using an \texttt{AllReduce} operation. Figure~\ref{fig:dp} illustrates this communication pattern unrolled over $T$ training steps.
 
 \begin{algorithm}
 \caption{Data Parallel Gradient Synchronization}
@@ -196,66 +178,25 @@ in Figure~\ref{fig:dp}, is typically enabled by an
 \State Sample batch: $x_i\sim D_i$
 \State Compute gradient: $g_i \gets \nabla_{\theta^{(t-1)}} \mathcal{L}(x_i; \theta^{(t-1)})$
 \State Sync gradients: $g \gets \frac{1}{n}\sum_{i}^n g_i$ \Comment{$\mathtt{AllReduce}$}
-\State Update model: $\theta_i^{(t)} \gets \mathtt{OPT}(\theta^{(t-1)}, g)$
+\State Update model: $\theta^{(t)} \gets \mathtt{OPT}(\theta^{(t-1)}, g)$
 \end{algorithmic}
 \end{algorithm}
 
-\textit{Pipeline parallelism} (PP)~\cite{huang2019gpipe} partitions the model,
-creating $n$ model shards $f^{(1)},\dots,f^{(n)}$ parameterized by
-$\theta_1,\dots,\theta_n$, such that the full model is represented as a pipeline
-of form $f_{\theta}=f^{(1)}_{\theta_1}\circ\dots\circ f^{(1)}_{\theta_n}$. Model
-shards are often referred to as "stages" in the pipeline, where the $i$-th stage
-serves the model shard $f^{(i)}_{\theta_i}$.  For deep learning architectures
-such a layer-wise partition is natural, as they are typically architected as
-repeated computational blocks, e.g. convolutional blocks in
-CNNs~\cite{krizhevsky2012alexnet} and Transformer blocks in
-Transformer~\cite{vaswani2017transformer} The partitioning creates a
-bi-directional communication pattern between stages during training, as shown in
-Figure~\ref{fig:pp}: During a forward pass activations are communicated from
-stage $i$ to $i+1$, and during the backward pass gradients are sent from stage
-$i$ to $i-1$. Despite its simplicity, PP is notoriously hard to optimize. Naive
-implementations suffer from significant GPU idle time, e.g. when the first node
-has to wait for the full pipeline forward and backward pass before being able to
-compute its local gradient. Efficient PP implementations therefore rely on
-micro-batching and advanced scheduling techniques to be practically
-viable~\cite{harlap2018pipedream, huang2019gpipe}. 
+In \textit{Pipeline Parallelism} (PP)~\cite{huang2019gpipe}, the model is partitioned into $n$ stages, with each stage holding a unique subset of parameters $\theta_i$. The full model is then represented as a pipeline, where each stage processes a portion of the input sequentially. Communication occurs in two phases during training: activations are sent forward through the pipeline during the forward pass, and gradients are sent backward during the backward pass (Figure~\ref{fig:pp}). Importantly, PP relies solely on point-to-point communication between adjacent stages without all-to-all synchronization.
 
-% PP communication cost scales with the number of stages $n$, the micro batch size and the model's hidden dimension, but 
+Despite its simplicity, PP is challenging to optimize in practice due to synchronization delays that cause GPU idle time. For example, the first stage must wait for the full forward and backward pass through the entire pipeline before it can process the next input. Efficient PP implementations, therefore, rely on techniques such as micro-batching and advanced scheduling to minimize idle time and maximize throughput~\cite{harlap2018pipedream, huang2019gpipe}. Further, for large models, the computation-to-communication ratio grows in favor of PP communication, allowing to "hide" communication latency behind computation~\cite{fernandez2024scalingtrends}.
 
-It is possible to design \textit{hybrid parallelism} (DPP) which combines DP and
-PP. It is natural to partition both the dataset and model into $\{D_i\}_{i\in
-[m]}$ and $\{\theta_j\}_{j\in [n]}$. This creates a $m\times n$ grid, where the
-$(i,j)$-th node handles data shard $D_i$ and model shard $\theta_j$. The
-emerging $m\times n$ grid structure is visualized for $9$ nodes distributed
-evenly into three stages in Figure~\ref{fig:dpp}. The partition of model and
-data results in independent PP ({\color{oorange} PP1, PP2, PP3}) and DP
-({\color{bblue} DP1, DP2, DP3}) groups, shown as shaded areas. During training,
-the communication patterns are interleaved: First, nodes send activations and
-gradients (PP communication) within each PP group $i=1\dots,m$ to accumulate
-local gradients. Then, within each DP group $j=1,\dots,n$, nodes run an
-\texttt{AllReduce} to average local gradients for their model shard (DP
-communication). 
+Both parallelization techniques may be combined. We will refer to this form of hybrid parallelism as \textit{Data-Pipeline Parallelism (DPP)}. In this approach, both the dataset and model are partitioned into $\{D_i\}_{i \in [m]}$ and $\{\theta_j\}_{j \in [n]}$, resulting in a two-dimensional grid of $m \times n$ nodes, where the $(i,j)$-th node is responsible for data shard $D_i$ and model shard $\theta_j$. Figure~\ref{fig:dpp} illustrates the communication pattern for a $2\times 2$ DPP system. PP and DP communication is interleaved: First, nodes within each PP group communicate activations and gradients to accumulate local gradients independently. Then, nodes synchronize local gradients within each DP group before updating their model shard.
 
 \begin{figure}[ht]
     \centering
     \vspace{0.5cm}
     \includegraphics[width=0.48\textwidth]{figures/dpp.pdf}
-    \caption{\textbf{DPP.} We show communication patterns in a 2D grid of
-    $2\times2$ nodes over $T$ training steps. PP and DP communication is
-    interleaved.  First, nodes accumulate gradients by forward and backward
-    passes through pipelines in independent PP groups (\mbox{\orangebox}). Then,
-    they average gradients in DP groups (\mbox{\bluecircle}) before performing a
-    model update.}
+    \caption{\textbf{DPP.} Illustration of communication patterns in a hybrid parallelism (DPP) setup with a $2 \times 2$ grid of nodes. PP and DP communication are interleaved: PP groups accumulate local gradients independently. Then, DP groups synchronize gradients before updating the model.}
     \label{fig:dpp}
 \end{figure}
 
-All described parallelization techniques produce equivalent gradient updates,
-leading to identical models $\theta^{(t)}$ at any $t$. However, they
-fundamentally differ in how they distribute computation across nodes and create
-distinct communication patterns, as described. Even in centralized settings,
-identifying the optimal parallelization technique is complex as it is highly
-sensitive to the model size, as well as training, hardware and network
-setup~\cite{hagemann2024parallelization, fernandez2024scalingtrends}.
+All described parallelization techniques produce equivalent gradient updates and converge to identical model parameters $\theta^{(t)}$. However, they differ fundamentally in how computation and communication are distributed, which impacts efficiency depending on model size, hardware, and network configuration~\cite{hagemann2024parallelization, fernandez2024scalingtrends}.
 
 \subsection{Decentralized Training}
 
