@@ -3,7 +3,6 @@
 \usepackage[accepted]{icml2023}
 
 % Packages
-\usepackage{hyperref}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{multirow}
@@ -15,6 +14,11 @@
 \usepackage{tcolorbox}
 \usepackage{algorithm, algpseudocodex}
 \usepackage{epstopdf}
+\usepackage[colorlinks=true,
+            linkcolor=blue,
+            filecolor=blue,
+            urlcolor=blue,
+            citecolor=blue]{hyperref}
 
 % Graphics
 \DeclareGraphicsExtensions{.png,.pdf}
@@ -133,7 +137,7 @@ small number of corporate and state entities~\cite{jaghouar2024intellect1}.
 % capability capture or misue.
 
 % Decentralized training
-Recently, decentralization has emerged as a promising counter-weight to this
+Decentralization has emerged as a promising counter-weight to this
 trajectory. Decentralized training aims to pool the vast, cheap compute
 resources across the globe for collaborative model training efforts. However,
 this new paradigm brings significant technical and algorithmic challenges. Most
@@ -313,21 +317,76 @@ identifying the optimal parallelization technique is complex as it is highly
 sensitive to the model size, as well as training, hardware and network
 setup~\cite{hagemann2024parallelization, fernandez2024scalingtrends}.
 
-% \subsection{Decentralized Training}
-% 
-% Decentralized training may be viewed a special form of distributed training
-% subject to additional constraints imposed by typical hardware and network
-% conditions in globally distributed node pools.
-% 
-% \begin{enumerate}
-%   \item \textit{Slow Interconnect:} The average bandwidth is typically
-%   orders-of-magnitude lower than in typical HPC settings.
-%   \item \textit{Network Heterogenity:} Interconnect may vary greatly between
-%   different pair of nodes, resulting in asymmetric communication.
-%   \item \textit{Device Heterogenity:} Devices may range from low-end to high-end
-%   \item \textit{Dynamic World Size:} Devices may leave or enter the training at any time
-% \end{enumerate}
-% 
+\subsection{Decentralized Training}
+
+Much of the ground work in decentralized learning is thanks to efforts in 
+federated learning (FL)~\cite{mcmahan2016fl}. FL enables learning on a network
+of mobile devices which retain private access to their own data. In this
+setting, clients train local models, and occassionally shares its model
+parameters with a central server for
+aggregation~\cite{mcmahan2016fl,wang2020fedma}. In recent years, the focus of
+decentralized learning has shifted to enable large-scale training on cheap,
+pre-emptible hardware, sometimes referred to as \textit{volunteer computing},
+though many of the ideas of FL still apply. In this paradigm, decentralized
+training may be viewed as a form of distributed training subject to additional
+constraints imposed by the unique hardware and network conditions when using
+volunteer computing hardware:
+
+\begin{enumerate}
+  \item \textit{Slow Interconnect:} The average bandwidth is typically
+  orders-of-magnitude lower than in HPC settings.
+  \item \textit{Network Heterogenity:} Interconnect may vary greatly between
+  different pair of nodes, resulting in asymmetric communication.
+  \item \textit{Device Heterogenity:} Devices may range from low-end to high-end devices
+  \item \textit{Dynamic World Size:} Devices may leave or enter the training at any time
+\end{enumerate}
+
+Today, research tackles all of the above constraints.
+\citeauthor{zhang2020volatileinstances} first investigated enabling
+fault-tolerant training on pre-emptible instances, which was later developed in 
+SWARM~\cite{ryabinin2023swarm} to enable fault-tolerant DPP training with 
+hetereogeneous hardware. Another line of research focuses on reducing the
+communication volume of decentralized training to combat the slow interconnect,
+specifically in data parallel settings which require frequent gradient
+synchronization. DiLoCo~\cite{douillard2023diloco} proposes a dual optimization
+scheme which allows to reduce gradient synchronization frequency by a large
+constant factor, while preserving generalization performance. NousResearch
+proposed Decoupled Momentum (DeMo)~\cite{peng2024demo}, a fused data parallel
+and optimizer algorithm which synchronizes only fast momentum components instead
+of full gradients. Finally, EXO Labs' SPARTA~\cite{exo2025sparta} only shares
+and averages a small random subset of gradients for synchronization.
+
+Further, there are ongoing efforts to scale the research to production-grade
+systems. Famous examples are Transformers
+Together~\cite{diskin2021collaborativelearning} for collaborative training, and
+Petals~\cite{borzunov2023petals} for inference of LLMs.  The most recent
+collaborative, decentralized training run, Prime Intellect's 10B-parameter
+INTELLECT-1~\cite{jaghouar2024intellect1}, demonstrates the feasibility of
+decentralized training on modern scale.
+
+% Training
+% Fault-tolerance:
+% - Machine-learning on volatile instances (2020)
+% - SWARM
+
+% Lower communication:
+% - ZeRo (2019): Low-memory optimizer
+% - DiLoCo (2023): Inner-outer optimizer that can reduce sync freq + OpenDiLoCo/ Intellect-1
+% - DeMO (2024): Fused optimizer and data-parallel algorithm that reduces synchronization volume by only synchronizing fast momentum components in SGD-M optimizer
+% - SPARTA (2025): Sharing and averaging random subset of model parameters every step
+
+% Production System:
+% - DeepSpeed: 
+% - Megatron-LM: GPU optimized techniques for training transformer models at-scale
+% - Picotron: (Megatron little brother) Minimalistic 4D-parallelism distributed training framework for education purpose
+% - Prime: Framework for efficient, globally distributed training of AI models over the internet.
+
+% Inference:
+% SWARM-like: Petals
+
+% Uncategorized
+% Transformers Together
+
 % In this setting, traditional parallelization methods become
 % \textit{communication-bound}. This means that the majority of the training time
 % is spent waiting for networking operations to follow, leading to low device
@@ -340,21 +399,21 @@ setup~\cite{hagemann2024parallelization, fernandez2024scalingtrends}.
 
 In the decentralized setting synchronizing gradients every step
 (Algorithm~\ref{alg:dp}) may be prohibitive due to slow interconnect.
-DiLoCo~\cite{douillard2023diloco} adapts traditional DP to the decentral
-setting by significantly reducing the required synchronization frequency. It is
-based on a local-global optimization scheme, described in
-Algorithm~\ref{alg:diloco}. Each worker $i=1,\dots,n$ in a world of
-$n$ nodes has access to a local data shard $D_i$ and stores a full model replica
-$\theta$. Training proceeds by each node training locally for a fixed number of
-$H$ steps using a local optimizer. To synchronize, each node computes and
-averages its pseudo-gradient (the difference between the parameters before and
-after the inner optimization) to update a global model using an global
-optimizer. Training proceeds iteratively, starting from the shared global model.
+DiLoCo~\cite{douillard2023diloco} adapts traditional DP to the decentral setting
+by significantly reducing the required synchronization frequency. It is based on
+a local-global optimization scheme, described in Algorithm~\ref{alg:diloco}.
+Each worker $i=1,\dots,n$ in a world of $n$ nodes has access to a local data
+shard $D_i$ and stores a full model replica $\theta$. Training proceeds by each
+node training locally for a fixed number of $H$ steps using a local optimizer.
+To synchronize, each node computes and averages its pseudo-gradient (the
+difference between the parameters before and after the inner optimization) to
+update a global model using an global optimizer. Training proceeds iteratively,
+starting from the shared global model.
 
 \begin{algorithm}
 \caption{DiLoCo Gradient Synchronization}
 \label{alg:diloco}
-\begin{algorithmic}[1]
+\begin{algorithmic}
 \State \textbf{Input:} Local dataset $D_i$, Model $\theta^{(t-1)}$, Optimizers $\mathtt{OPT}_{\text{local}}$ and $\mathtt{OPT}_{\text{global}}$, Loss $\mathcal{L}$, Num. Local Steps $H$ 
 \State Copy global model: $\theta_i^{(t-1)} \gets \theta^{(t-1)}$
 \For{$H$ steps}
