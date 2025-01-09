@@ -113,11 +113,7 @@
 
 % Abstract
 \begin{abstract}
-  We investigate DiLoCo-SWARM, a decentralized training approach that combines
-  the pipeline and data parallelism of SWARM with DiLoCo's reduced-frequency
-  gradient synchronization. Our experiments on language modeling tasks show that
-  DiLoCo-SWARM matches or surpasses fully synchronized SWARM baselines despite
-  synchronizing gradients up to 50 times less frequently.
+  This work proposes \textit{DiLoCo-SWARM}, a decentralized training method that integrates infrequent gradient synchronization from DiLoCo into SWARM's fault-tolerant data-pipeline parallelism. Our experiments show that DiLoCo-SWARM matches the generalization performance of traditional SWARM while reducing synchronization frequency by up to 50x. We further demonstrate that DiLoCo-SWARM scales efficiently to larger models, with communication savings increasing as model size grows.
 \end{abstract}
 
 \section{Introduction}
