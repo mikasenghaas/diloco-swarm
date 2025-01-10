@@ -2,6 +2,8 @@
 
 This repository contains the full experiment code and results for validating DiLoCo-SWARM, a distributed training method that combines the pipeline and data parallelism of [SWARM](https://arxiv.org/abs/2301.11913) with [DiLoCo](https://arxiv.org/abs/2311.08105)'s reduced-frequency gradient synchronization.
 
+![DiLoCo-SWARM](/presentation/figures/experiment1-1.png)
+
 ## 🔗 Shortcuts
 
 - 📄 Read the [report](report.pdf)
