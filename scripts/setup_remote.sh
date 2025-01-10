@@ -17,8 +17,8 @@ export PATH="$PERSISTENT_DIR/.local/bin:$PERSISTENT_DIR/miniconda/bin:$PATH"
 # Conda environment setup
 source $PERSISTENT_DIR/miniconda/bin/activate
 conda init bash
-conda create -y -n swarm python~=3.10.15
-conda activate swarm
+conda create -y -n diloco-swarm python~=3.10.15
+conda activate diloco-swarm
 
 # Dependencies
 PIP_FLAGS="--root-user-action ignore --upgrade pip"
