@@ -113,30 +113,28 @@
 
 % Abstract
 \begin{abstract}
-  This work proposes \textit{DiLoCo-SWARM}, a decentralized training method that integrates infrequent gradient synchronization from DiLoCo into SWARM's fault-tolerant data-pipeline parallelism. Our experiments show that DiLoCo-SWARM matches the generalization performance of traditional SWARM while reducing synchronization frequency by up to 50x. We further demonstrate that DiLoCo-SWARM scales efficiently to larger models, with communication savings increasing as model size grows.
+  This work proposes \textit{DiLoCo-SWARM}, a decentralized training method that integrates infrequent gradient synchronization from DiLoCo into SWARM's fault-tolerant data-pipeline parallelism. Our experiments show that DiLoCo-SWARM matches the generalization performance of traditional SWARM while reducing synchronization frequency by up to 50x. We analytically show that DiLoCo-SWARM scales efficiently to larger models, with communication savings increasing as model size grows.
 \end{abstract}
 
 \section{Introduction}
 
 Modern foundation models contain billions of parameters and are trained on trillions of tokens~\cite{chowdhery2022palm,brown2023gpt3,dubey2024llama3,google2024gemini}. Achieving this scale necessitates orchestrating thousands of GPUs to distribute computation~\cite{dubey2024llama3,deepseekai2024}. However, conventional parallelization techniques rely heavily on high-bandwidth interconnects to avoid communication bottlenecks. As a result, cutting-edge models are primarily trained in high-performance clusters (HPCs). Operating these clusters incurs significant costs, thereby restricting research abilities on foundation models to a select group of corporate and state actors~\cite{jaghouar2024intellect1}.
 
-Decentralized training has emerged as a promising alternative. By leveraging low-cost, globally distributed compute resources, decentralized training promises to democratize access to model development. However, this paradigm shift introduces substantial technical challenges, particularly in accommodating latency and bandwidth limitations in Internet connections, heterogeneous compute environments and dynamic node participation.
+Decentralized training has emerged as a promising alternative. By leveraging low-cost, globally distributed compute resources, decentralized training promises to democratize access to model development. However, this paradigm shift introduces substantial technical challenges, particularly in accommodating latency and bandwidth limitations, heterogeneous compute environments and node failures.
 
-While decentralized training efforts cannot yet match the 
-scale and efficiency of centralized training, the field 
-has made significant progress in recent years. INTELLECT-1~\cite{jaghouar2024intellect1}, a 10B parameter model trained collaboratively across the globe, demonstrates this most recently. The model builds on DiLoCo~\cite{douillard2023diloco}, a data parallel method that reduces communication overhead by synchronizing gradients infrequently through a dual optimization scheme. DiLoCo achieves competitive performance with traditional data parallelization but only synchronizes gradients every 500 steps instead of after each step. However, DiLoCo requires each node to store a full model replica, limiting participation to high-performance hardware.
+While decentralized training efforts cannot yet match the scale and efficiency of centralized training, the field has made significant progress in recent years. INTELLECT-1~\cite{jaghouar2024intellect1}, a 10B parameter model trained collaboratively across the globe, demonstrates this most recently. The model builds on DiLoCo~\cite{douillard2023diloco}, a data parallel method that reduces communication overhead by synchronizing gradients infrequently through a dual optimization scheme. DiLoCo achieves competitive performance with traditional data parallelization but only synchronizes gradients every 500 steps instead of after each step. However, DiLoCo requires each node to store a full model replica, limiting participation to high-performance hardware when training large models.
 
 SWARM~\cite{ryabinin2023swarm} offers a promising, though less explored, alternative for larger-scale decentralized training. SWARM combines both data and pipeline parallelism and introduces several novel techniques to enable fault-tolerant training in heterogeneous compute and network conditions. By partitioning the model across nodes, SWARM can train larger models and allow devices with limited resources to participate. However, in its original formulation, SWARM requires frequent gradient synchronization within pipeline stages. 
 
-This work proposes \textit{DiLoCo-SWARM}, a novel approach that integrates DiLoCo-style infrequent gradient synchronization into SWARM parallelism. Our experimental results are summarized in the following contributions:
+This work proposes \textit{DiLoCo-SWARM}, a novel approach that integrates DiLoCo-style infrequent gradient synchronization into SWARM parallelism. Our key contributions are:
 
 \begin{enumerate}
-  \item \textbf{Convergence.} We demonstrate that SWARM parallelism can effectively integrate DiLoCo and achieve comparable validation perplexity to a synchronous SWARM baseline, while requiring significantly 50x fewer gradient updates.
+  \item \textbf{Convergence.} We demonstrate that SWARM parallelism can effectively integrate DiLoCo and achieve comparable validation perplexity to a synchronous SWARM baseline, while requiring 50x fewer gradient synchronization.
   \item \textbf{Communication Efficiency.} We show that DiLoCo-SWARM achieves increasing communication savings over SWARM as the model size grows.
   \item \textbf{Robustness.} We validate the robustness of DiLoCo-SWARM to synchronization frequency, and model sizes, underlining its robustness at scale.
 \end{enumerate}
 
-We open-source the experiment code and results on \github{} and \wandb{}, along with a distilled version of the training logic in a \gist{} with only a few hundred lines of PyTorch code. We aim for these resources to foster further open-source research on scaling DiLoCo-SWARM parallelism to production-grade systems, following the trajectory of DiLoCo's development.
+We open-source the experiment code and results on \github{} and \wandb{}, along with a distilled version of the training logic in a \gist{} with only a few hundred lines of PyTorch code. We aim for these resources to foster further open-source research on scaling DiLoCo-SWARM.
 
 \section{Background}
 
@@ -144,7 +142,7 @@ This section outlines the foundations of distributed and decentralized learning,
 
 \subsection{Distributed Training}
 
-In distributed training, $n$ nodes collaboratively train a \textit{model} $f_{\theta}$ parameterized by weights $\theta$, on a \textit{dataset} of samples $D = \{(\mathbf{x}_1, \mathbf{y}_1),\dots\}$. This collaboration requires periodic communication of intermediate results between nodes. We will describe two fundamental parallelization techniques relevant to DiLoCo-SWARM.
+In distributed training, $n$ nodes collaboratively train a \textit{model} parameterized by weights $\theta$, on a \textit{dataset} of samples $D = \{(\mathbf{x}_1, \mathbf{y}_1),\dots\}$. This collaboration requires periodic communication of intermediate results between nodes.
 
 \begin{figure}[ht]
     \centering
@@ -152,7 +150,7 @@ In distributed training, $n$ nodes collaboratively train a \textit{model} $f_{\t
         \centering
         \vspace{0.5cm}
         \includegraphics[width=\textwidth]{figures/dp.pdf}
-        \caption{\textbf{DP Communication}. Nodes synchronize gradients (\bluecircle) at each step within a DP group.}
+        \caption{\textbf{DP Communication}. Two nodes in a DP group hold the full model $\theta$ and a local data shard $D_i$. In each step, they synchronize local gradients via \texttt{AllReduce} (\bluecircle).}
         \label{fig:dp}
     \end{subfigure}
     \hfill
@@ -160,10 +158,10 @@ In distributed training, $n$ nodes collaboratively train a \textit{model} $f_{\t
         \centering
         \vspace{0.5cm}
         \includegraphics[width=\textwidth]{figures/pp.pdf}
-        \caption{\textbf{PP Communication}. Nodes communicate activations and gradients (\orangebox) between adjacent stages within a PP group.}
+        \caption{\textbf{PP Communication}. Two nodes in a PP group (\orangebox) hold a unique model shard $\theta_j$ and communicate activations and gradients (point-to-point) to update their respective model shard.}
         \label{fig:pp}
     \end{subfigure}
-    \caption{\textbf{DP and PP.} Illustration of communication patterns for $n=2$ DP and PP groups over $T$ training steps. Nodes are represented as boxes, and communication as solid lines. The dotted lines indicate no communication.}
+    \caption{\textbf{DP and PP.} Illustration of communication patterns for $n=2$ DP and PP groups, unrolled over $T$ training steps. Nodes are represented as boxes, and communication as solid lines. The dotted lines indicate no communication.}
 \end{figure}
 
 In \textit{Data Parallelism} (DP)~\cite{dean2012dp}, the dataset is partitioned into $n$ shards, with each node holding a unique shard $D_i$ and a complete model replica $\theta$. Training proceeds as follows: Each node samples a batch from its local data shard, and computes local gradients through a forward and backward pass. Before updating the model, nodes synchronize gradients to ensure identical updates across all nodes (Algorithm~\ref{alg:dp}). Typically, the synchronization is performed using an \texttt{AllReduce} operation. Figure~\ref{fig:dp} illustrates this communication pattern unrolled over $T$ training steps.
@@ -190,7 +188,7 @@ Both parallelization techniques may be combined. We will refer to this form of h
     \centering
     \vspace{0.5cm}
     \includegraphics[width=0.48\textwidth]{figures/dpp.pdf}
-    \caption{\textbf{DPP.} Illustration of communication patterns in a hybrid parallelism (DPP) setup with a $2 \times 2$ grid of nodes. PP and DP communication are interleaved: PP groups accumulate local gradients independently (\orangebox). Then, DP groups synchronize gradients before updating the model (\bluecircle).}
+    \caption{\textbf{DPP.} Illustration of communication patterns in a hybrid parallelism (DPP) setup with a $2 \times 2$ grid of nodes, unrolled over $T$ training steps. PP and DP communication are interleaved: PP groups accumulate local gradients independently (\orangebox). Then, DP groups synchronize gradients before updating the model (\bluecircle).}
     \label{fig:dpp}
 \end{figure}
 
@@ -201,7 +199,7 @@ All described parallelization techniques produce equivalent gradient updates and
 Decentralized learning builds on foundational work in federated learning (FL)~\cite{mcmahan2016fl}, which enables learning on a network
 of mobile devices that retain private access to their own data and periodically share local model updates with a central server for aggregation~\cite{mcmahan2016fl,wang2020fedma}. More recently, decentralized learning has shifted toward large-scale training on preemptible, low-cost hardware, often referred to as \textit{volunteer computing}. While many FL concepts remain relevant, modern research in decentralized learning focuses on improving training efficiency under the unique constraints of decentralized environments: orders-of-magnitude slower interconnect, network and device heterogeneity, and instances joining and leaving training at any time.
 
-Recent research addresses all of these challenges: \citeauthor{zhang2020volatileinstances} first explored fault-tolerant training on pre-emptible instances, which SWARM extended to support hybrid parallelism in heterogeneous environments~\cite{ryabinin2023swarm}. Another key area of research concerns reducing the communication volume of decentralized training to combat the slow interconnect. DiLoCo~\cite{douillard2023diloco} reduces the gradient synchronization frequency via a dual optimization scheme, while DeMo~\cite{peng2024demo} synchronizes only fast-moving momentum components. SPARTA~\cite{exo2025sparta} proposes to only communicate a small random subset of gradients at each step.
+Recent research addresses these challenges: \citeauthor{zhang2020volatileinstances} first explored fault-tolerant training on pre-emptible instances, which SWARM extended to support hybrid parallelism in heterogeneous environments~\cite{ryabinin2023swarm}. Another key area of research concerns reducing the communication volume of decentralized training to combat the slow interconnect. DiLoCo~\cite{douillard2023diloco} reduces the gradient synchronization frequency via a dual optimization scheme, while DeMo~\cite{peng2024demo} synchronizes only fast-moving momentum components. SPARTA~\cite{exo2025sparta} proposes to only communicate a small random subset of gradients at each step.
 
 Efforts to scale decentralized training to production systems are ongoing. Notable examples include collaborative training platforms such as Transformers Together~\cite{diskin2021collaborativelearning} and Petals~\cite{borzunov2023petals}, which enable distributed inference for large language models. The recent INTELLECT-1 run~\cite{jaghouar2024intellect1} demonstrated the feasibility of decentralized training at scale by collaboratively training a 10-billion-parameter model across the globe.
 
@@ -226,13 +224,13 @@ In decentralized training, synchronizing gradients at every step, as in traditio
 \end{algorithmic}
 \end{algorithm}
 
-Figure~\ref{fig:diloco} illustrates the communication pattern of DiLoCo in contrast to DP (Figure~\ref{fig:dp}). Nodes only synchronize pseudo-gradients every $H$ steps, thus reducing communication costs by $1/H$. Empirical results show that DiLoCo with $H=500$ matches the generalization performance of a synchronous DP baseline while reducing communication by a factor of 500~\cite{douillard2023diloco,jaghouar2024opendiloco}. However, like DP, DiLoCo is limited by the memory capacity of individual nodes, making it unsuitable for models that exceed local memory. Scaling DiLoCo requires techniques such as gradient quantization~\cite{jaghouar2024intellect1} or parameter offloading~\cite{cui2016}.
+Figure~\ref{fig:diloco} illustrates the communication pattern of DiLoCo in contrast to DP (Figure~\ref{fig:dp}). Nodes only synchronize pseudo-gradients every $H$ steps. Empirical results show that DiLoCo with $H=500$ matches the generalization performance of a synchronous DP baseline while reducing communication by a factor of 500~\cite{douillard2023diloco,jaghouar2024opendiloco}. However, like DP, DiLoCo is limited by the memory capacity of individual nodes, making it unsuitable for models that exceed local memory. Scaling DiLoCo requires techniques such as gradient quantization~\cite{jaghouar2024intellect1} or parameter offloading~\cite{cui2016}.
 
 \begin{figure}[ht]
     \centering
     \vspace{0.5cm}
     \includegraphics[width=0.45\textwidth]{figures/diloco.pdf}
-    \caption{\textbf{DiLoCo.} Comparison of communication patterns for a $n=2$ DiLoCo group over $T$ training steps. Unlike traditional DP, DiLoCo synchronizes pseudo-gradients (\purplecircle) every $H=2$ steps, reducing total communication by a factor of $1/2$.}
+    \caption{\textbf{DiLoCo.} Comparison of communication patterns for a $n=2$ DiLoCo group, unrolled over $T$ training steps. Unlike traditional DP, DiLoCo synchronizes pseudo-gradients (\purplecircle) every $H=2$ steps, reducing total communication by a factor of $1/2$.}
     \label{fig:diloco}
 \end{figure}
 
@@ -240,11 +238,11 @@ Figure~\ref{fig:diloco} illustrates the communication pattern of DiLoCo in contr
 
 While DiLoCo reduces communication frequency, it does not address memory limitations. Sharding the model across nodes, as in pipeline parallelism (PP), is a natural solution. However, traditional PP is poorly suited to decentralized environments due to its sequential nature, which causes significant idle time when nodes have heterogeneous performance. Additionally, a single node failure can stall the entire pipeline.
 
-SWARM parallelism~\cite{ryabinin2023swarm} addresses these limitations by introducing a fault-tolerant data-pipeline parallelism (DPP) approach. Rather than relying on a fixed grid of nodes, SWARM constructs stochastic pipelines dynamically. During the forward pass, each node forwards activations to a randomly selected peer in the next stage, with probability proportional to the peer's throughput. The backward pass follows the same path in reverse to ensure gradient consistency. Once all micro-batches are processed, nodes within each stage form DP groups and synchronize local gradients before updating the model.
+SWARM parallelism~\cite{ryabinin2023swarm} addresses these limitations by introducing a fault-tolerant DPP approach. Rather than relying on a fixed grid of nodes, SWARM constructs stochastic pipelines dynamically. During the forward pass, each node forwards activations to a randomly selected peer in the next stage, with probability proportional to the peer's throughput. The backward pass follows the same path in reverse to ensure gradient consistency. Once all micro-batches are processed, nodes within each stage form DP groups and synchronize local gradients before updating their respective model shard.
 
 This \textit{stochastic wiring} approach has two key advantages: (1) it naturally balances workloads in heterogeneous environments by routing activations to faster nodes, and (2) it enables the pipeline to recover from node failures by re-routing activations or gradients to available nodes. As long as each stage has at least one active node, SWARM remains functional.
 
-A key insight of SWARM is the so-called \textit{Square-Cube Law}~\cite{ryabinin2023swarm}, which states that the communication cost of pipeline parallelism grows quadratically while the computation cost grows cubically for increasing model sizes. Hence, nodes spend more time computing than communicating in large models, allowing them to hide the communication latency behind computation. This leads to the unintuitive consequence that larger models become more communication-efficient.
+% A key insight of SWARM is the so-called \textit{Square-Cube Law}~\cite{ryabinin2023swarm}, which states that the communication cost of pipeline parallelism grows quadratically while the computation cost grows cubically for increasing model sizes. Hence, nodes spend more time computing than communicating in large models, allowing them to hide the communication latency behind computation. This leads to the unintuitive consequence that larger models become more communication-efficient.
 
 \begin{figure}[ht]
     \centering
@@ -255,7 +253,7 @@ A key insight of SWARM is the so-called \textit{Square-Cube Law}~\cite{ryabinin2
 
 \section{DiLoCo-SWARM}
 
-SWARM enables large-scale, fault-tolerant data-pipeline parallel (DPP) training in decentralized settings by dynamically constructing stochastic pipelines. However, its data-parallel component still requires frequent gradient synchronization, resulting in high communication costs. In contrast, DiLoCo~\cite{douillard2023diloco} reduces synchronization frequency through local-global optimization but is limited by memory constraints in large models.
+SWARM enables large-scale, fault-tolerant data-pipeline parallel (DPP) training in decentralized settings by dynamically constructing pipelines. However, its data-parallel component still requires frequent gradient synchronization, resulting in high communication costs. In contrast, DiLoCo~\cite{douillard2023diloco} reduces synchronization frequency through local-global optimization but is limited by memory constraints in large models.
 
 This motivates \textit{DiLoCo-SWARM}, a decentralized training method that combines the communication efficiency of DiLoCo with the scalability and fault-tolerance of SWARM. By replacing SWARM's data-parallel groups with DiLoCo groups, DiLoCo-SWARM significantly reduces the frequency of costly
 all-to-all gradient synchronization within SWARM stages (Figure~\ref{fig:diloco-swarm}).
@@ -273,8 +271,7 @@ Algorithm~\ref{alg:diloco-swarm} describes the algorithmic details of DiLoCo-SWA
 
 Each node begins with a copy of the global model shard $\theta_j^{(t-1)}$. During the inner optimization loop, nodes perform $H$ local steps, stochastically forwarding activations and gradients to adjacent stages and updating their local model shard $\theta_{i,j}$ using a local optimizer. After $H$ steps, nodes compute pseudo-gradients $\Delta_{i,j}$ and synchronize within their stage to update the global model shard $\theta_j^{(t)}$ using a global optimizer.
 
-DiLoCo-SWARM combines SWARM's stochastic wiring during local steps with DiLoCo to synchronize within SWARM stages. In doing so, the method reduces the points
-of gradient synchronization, resulting in more communication-efficient training. Unlike DiLoCo, which cuts communication by a factor of $H$, DiLoCo-SWARM cuts communication by a factor of $H$ times the fraction of the total communication cost incurred by gradient synchronization. Furthermore, due to stochastic wiring, gradients may depend on batches sampled from different data shards, resulting in data mixing across nodes.
+DiLoCo-SWARM combines SWARM's stochastic wiring during local steps with DiLoCo to synchronize within SWARM stages. In doing so, the method reduces the points of gradient synchronization, resulting in more communication-efficient training. In DiLoCo, gradient synchronization is the only form of communication, so reducing its frequency by a factor of $H$ results in a proportional reduction in communication cost. In DiLoCo-SWARM, gradient synchronization is only a fraction of the total communication cost, which comprises of both gradient synchronization and pipeline communication. Therefore, the communication cost reduction depends on the fraction of the total communication cost incurred by gradient synchronization. Furthermore, due to stochastic wiring, gradients may depend on batches sampled from different data shards, resulting in data mixing across nodes.
 
 \begin{algorithm}
 \caption{DiLoCo-SWARM}
@@ -334,11 +331,9 @@ In this section, we validate the effectiveness of DiLoCo-SWARM through a series 
 
 \subsection{Setup}
 
-We use the FineWeb-Edu dataset~\cite{penedo2024fineweb}, a large pre-training corpus of educational web content, for all experiments. FineWeb-Edu is chosen for its high token efficiency, allowing models to achieve strong performance on downstream benchmarks such as HellaSwag~\cite{zellers2019hellaswag} with significantly less data~\cite{karpathy2024nanogpt}.
+We use the FineWeb-Edu dataset~\cite{penedo2024fineweb}, a large pre-training corpus of educational web content, for all experiments. As our model, we chose the GPT-2 family~\cite{radford2019gpt2}, following the original architecture hyperparameters, as summarized in Table~\ref{tab:models}. To avoid additional gradient communication in pipelined settings, we do not share the weights of the embedding matrix and language modeling head. Unless otherwise stated, we use GPT-2 Small with roughly 180M parameters. We always train from randomly initialized weights.
 
-We train various sizes of GPT-2 models~\cite{radford2019gpt2}, following the original architecture hyperparameters, as summarized in Table~\ref{tab:models}. To avoid additional gradient communication in pipelined settings, we do not share the weights of the embedding matrix and language modeling head. Unless otherwise stated, we train GPT-2 Small from scratch.
-
-Hyper-parameters are adapted from the tuning done in DiLoCo (Douillard et al., 2023): The default local optimizer is AdamW~\cite{loshchilov2019adamw} with a linearly warmed up learning rate of $4\cdot10^{-4}$, and a weight decay of $0.01$. When DiLoCo is active, we use a Nesterov
+Hyperparameters are adapted from the tuning done in DiLoCo (Douillard et al., 2023): The default local optimizer is AdamW~\cite{loshchilov2019adamw} with a linearly warmed up learning rate of $4\cdot10^{-4}$, and a weight decay of $0.01$. When DiLoCo is active, we use a Nesterov optimizer
 with a learning rate of $0.7$ and a momentum of $0.9$ as the global optimizer. A detailed description of the hyperparameters is provided in Table~\ref{tab:hyperparameters} in the Appendix.
 
 Our main evaluation metric is the validation perplexity on a held-out set of 10M tokens from FineWeb-Edu. We evaluate during and after training to show the convergence against the number of training steps, as well as the total communication cost.
@@ -385,20 +380,18 @@ Our main experiment compares DiLoCo-SWARM to two baselines: a single-node setup 
   \label{fig:experiment1}
 \end{figure*}
 
-
 Figure~\ref{fig:experiment1-1} shows that DiLoCo-SWARM closely matches the strong SWARM baseline, with a final validation perplexity of 30.15 compared to 30.22. This confirms that infrequent gradient synchronization does not negatively impact convergence.
 
 Figure~\ref{fig:experiment1-2} shows the total communication cost for the same
-experiments. Surprisingly, the total communication cost is only moderately reduced in DiLoCo-SWARM compared to SWARM. This finding points at a an important difference between DiLoCo and DiLoCo-SWARM. In DiLoCo, synchronizing gradients every $H$ translates to a proportional reduction in communication cost. DiLoCo-SWARM, in contrast, interleaves DP and PP communication. Since
-DiLoCo can only reduce DP communication cost, PP communication cost remains
-constant. Figure~\ref{fig:communication-cost-scaling} shows the fraction of the communication cost for 4x2 SWARM training increasingly large models. It illustrates that DP communication cost scales faster and dominates the total communication cost for larger models. This finding suggests that DiLoCo-SWARM is more effective in reducing the communication cost for larger models.
+experiment. Surprisingly, the total communication cost is only moderately reduced in DiLoCo-SWARM compared to SWARM. This finding points at an important difference between DiLoCo and DiLoCo-SWARM. In DiLoCo, synchronizing gradients every $H$  steps translates to a proportional reduction in communication cost. DiLoCo-SWARM, in contrast, combines pipeline and gradient synchronization communication, and the former is unaffected by DiLoCo. Therefore, the communication cost reduction depends on the fraction of the total communication cost incurred by gradient synchronization. Figure~\ref{fig:communication-cost-scaling} shows the fraction of the communication cost for 4x2 SWARM training increasingly larger models. It illustrates that DP communication cost scales faster and dominates the total communication cost for larger models. This is due to the fact that increasing the model size only effects the pipeline communication cost through the hidden dimension $H$ (sub-linear), while the cost for gradient synchronization is directly proportional to all model parameters. This finding suggests that DiLoCo-SWARM is more effective in reducing the communication cost for larger models.
 
 \begin{figure}[ht]
   \centering
-  \includegraphics[width=0.45\textwidth]{figures/square-cube-law.pdf}
-  \caption{\textbf{Communication Cost Scaling} We show the (log) communication
-  cost incurred by DP and PP communication for 4x2 SWARMs in the common training
-  setup. Because of the square-cube law, PP communication dominates the total communication for smaller models, but DP communication dominates for larger models.} 
+  \includegraphics[width=0.45\textwidth]{figures/communication-cost-scaling.pdf}
+  \caption{\textbf{Communication Cost Scaling} We show analytically derived
+  (log) communication cost incurred by DP and PP communication for 4x2 SWARMs in
+  the common training setup. PP communication dominates the total communication
+  for smaller models, but DP communication dominates for larger models.} 
   \label{fig:communication-cost-scaling}
 \end{figure}
 
@@ -406,7 +399,7 @@ constant. Figure~\ref{fig:communication-cost-scaling} shows the fraction of the 
 
 We investigate the impact of varying the synchronization frequency within pipeline stages on convergence. Specifically, we train five models with synchronization intervals of $\{10, 20, 50, 100, 200\}$ steps, using the same setup as the main experiment.
 
-Table~\ref{tab:experiment2} shows that generalization performance improves with more frequent synchronization. Synchronizing every 10 steps achieves the best validation perplexity of 27.95 but the performance degrades only mildly when decreasing the frequency. A good trade-off between communication efficiency and performance is observed at 50 steps for our training setup. It is worth noting that this is more frequent compared to the 500 steps reported in DiLoCo. We attribute this difference to a significantly larger number of training steps in DiLoCo's setup, allowing for less frequent synchronization. We believe that with more training steps, a similar frequency can be achieved with DiLoCo-SWARM.
+Table~\ref{tab:experiment2} shows that generalization performance improves with more frequent synchronization. Synchronizing every 10 steps achieves the best validation perplexity of 27.95 but the performance degrades only mildly when decreasing the frequency. It is worth noting that this is more frequent compared to the 500 steps reported in DiLoCo. We attribute this difference to a significantly larger number of training steps in DiLoCo's setup, allowing for less frequent synchronization. We believe that with more training steps, a similar frequency is feasible with DiLoCo-SWARM.
 
 \begin{table}[ht]
 \centering
@@ -427,7 +420,7 @@ Table~\ref{tab:experiment2} shows that generalization performance improves with 
 
 \subsection{Model Size Ablation}
 
-Finally, we assess the scalability of DiLoCo-SWARM by training four GPT-2 model sizes (Tiny, Small, Medium, and Large) under the same conditions. Figure~\ref{fig:experiment3} shows that DiLoCo-SWARM consistently improves validation perplexity by approximately 18\% over the single-node baseline across all tested model sizes. One noticable outlier is the largest model, which exceeds the single GPU baseline later. We attribute this to untuned hyperparameters, and hypothesize that similar results could be obtained with more tuning. Overall, we conclude that DiLoCo-style gradient synchronization scales effectively with increasing model size.
+Finally, we assess the scalability of DiLoCo-SWARM by training four GPT-2 model sizes (Tiny, Small, Medium, and Large) under the same conditions. Figure~\ref{fig:experiment3} shows that DiLoCo-SWARM consistently improves validation perplexity over the single-node baseline across all tested model sizes. For all, but the GPT-2 Large model, DiLoCo-SWARM outperforms the baseline by roughly 18\%. We attribute the GPT-2 Large outlier to untuned hyperparameters, and hypothesize that similar results could be obtained with more careful tuning. Overall, we conclude that DiLoCo-style gradient synchronization scales effectively to larger models for the range of model sizes tested.
 
 \begin{figure}[ht]
   \centering
@@ -442,7 +435,7 @@ Finally, we assess the scalability of DiLoCo-SWARM by training four GPT-2 model 
 
 In this work, we introduced DiLoCo-SWARM, a decentralized training method that combines the communication efficiency of gradient synchronization of DiLoCo with the scalability and fault-tolerance of SWARM parallelism. By combining both methods, DiLoCo-SWARM reduces communication costs without compromising convergence performance.
 
-Our experimental results on language modeling tasks using the GPT-2 family of models demonstrate that DiLoCo-SWARM matches the generalization performance of traditional SWARM while reducing gradient synchronization frequency by up to 50x. The method shows stronger communication savings for larger models, where data-parallel communication becomes the dominant cost. These findings suggest that DiLoCo-style synchronization is compatible with SWARM and can be a practical solution for scaling decentralized training to larger models.
+Our experimental results on language modeling tasks using the GPT-2 family of models demonstrate that DiLoCo-SWARM matches the generalization performance of traditional SWARM while reducing gradient synchronization frequency by 50x. We analytically show that DiLoCo-SWARM shows stronger communication savings for larger models, where data-parallel communication becomes the dominant cost. These findings suggest that DiLoCo-style synchronization is compatible with SWARM and can be a practical solution for scaling decentralized training to larger models.
 
 \section{Future Work}
 
@@ -480,7 +473,7 @@ This work was developed in collaboration with the Scalable Computing Systems
 \subsection{Training Script Invocations}
 
 Below we show example invocations for different distributed training algorithms.
-All examples use a GPT-2 small model and the FineWeb-Edu dataset as an example.
+All examples use a GPT-2 Small model and the FineWeb-Edu dataset as an example.
 For more details see the README on \github.
 
 \begin{lstlisting}[language=bash]
@@ -563,6 +556,7 @@ training. For non-DiLoCo runs gradients are averaged before performing a regular
 local optimizer step.
 
 \begin{table}[ht]
+\small
 \centering
 \begin{tabular}{llc}
 \toprule
@@ -571,14 +565,18 @@ local optimizer step.
 \multirow{1}{*}{General} & Batch Size & 512 \\ 
 & Sequence Length & 1024 \\ 
 & Steps & 2000 \\
+& Num. Warmup Steps & 50 \\ 
 \hline
 \multirow{1}{*}{Local Optimizer} & Name & AdamW \\ 
-& Weight decay & - \\ 
+& Weight decay & 0.01 \\ 
 & Learning Rate & $4 \times 10^{-4}$ \\ 
 \hline
 \multirow{1}{*}{Global Optimizer} & Name & Nesterov \\ 
 & Learning Rate & 0.7 \\ 
 & Momentum & 0.9 \\ 
+\hline
+\multirow{1}{*}{SWARM} & Num. Stages & 2  \\ 
+& Num. Nodes per Stage & 4 \\
 \bottomrule
 \end{tabular}
 \caption{Hyperparameters}
