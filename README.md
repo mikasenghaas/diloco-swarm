@@ -5,17 +5,15 @@ This repository contains the full experiment code and results for validating DiL
 ## 🔗 Shortcuts
 
 - 📄 Read the [report](report.pdf)
-- 📊 View raw and analyzed experiment results in [W&B](https://wandb.ai/mikasenghaas/diloco-swarm) and this  [notebook](notebooks/3.0-results.ipynb)
-- 🧠 Understand DP, PP, DiLoCo, SWARM, and their interplay in this pure PyTorch
-single-file [training script]() - distilled from this codebase
+- 🗣️ See my presentation [slides](https://docs.google.com/presentation/d/1QVSvN9tnBtOj6ur6uI9QgId63T3R2TkK1fA7dqz8z00/edit?usp=sharing)
+- 📊 View experiment results in [W&B](https://wandb.ai/mikasenghaas/diloco-swarm) and this  [notebook](notebooks/3.0-results.ipynb)
+- 🧠 Understand DP, PP, DiLoCo, SWARM, and their interplay in this pure PyTorch single-file [training script]() - distilled from this codebase
 - 💻 Replicate the experiments following the [setup](#setup) and [replicating experiments](#replicating-experiments) sections below.
 
 
 ## ⚙️ Setup
 
-This project should run on any machine with GPU support, and PyTorch installed.
-To be safe, follow my setup, which is described below. Get yourself access to
-some GPUs via [Prime Compute](https://www.app.primeintellect.com/).
+This project should run on any machine with GPU support, and PyTorch installed. To be safe, follow my setup, which is described below. Get yourself access to some GPUs via [Prime Compute](https://www.app.primeintellect.com/).
 
 **1. Clone the Repository**
 
